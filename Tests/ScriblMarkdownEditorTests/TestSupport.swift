@@ -23,6 +23,11 @@ final class TestMarkdownEditorHost: MarkdownEditorHost {
     var linkableDocumentURLs: [URL] { Array(documents.keys) }
     var codeHighlighterOverride: (any MarkdownCodeHighlighting)?
     var codeHighlighter: (any MarkdownCodeHighlighting)? { codeHighlighterOverride }
+    var shouldChangeTextOverride: ((NSTextView, NSRange, String?) -> Bool)?
+
+    func shouldChangeText(in textView: NSTextView, range: NSRange, replacement: String?) -> Bool {
+        shouldChangeTextOverride?(textView, range, replacement) ?? true
+    }
 
     func linkedDocument(at url: URL) -> MarkdownLinkedDocument? {
         documents[url]

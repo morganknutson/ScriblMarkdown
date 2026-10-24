@@ -67,6 +67,21 @@ final class MarkdownEditorHostingTests: XCTestCase {
         XCTAssertEqual(color, .systemPink)
     }
 
+    func testHostCanRejectSourceEditsBeforeTheyChangeText() {
+        let host = TestMarkdownEditorHost()
+        host.shouldChangeTextOverride = { textView, range, replacement in
+            let proposed = (textView.string as NSString).replacingCharacters(in: range, with: replacement ?? "")
+            return proposed.count <= 5
+        }
+        let editor = MarkdownEditorView(controller: MarkdownEditorController(host: host), text: "Hello")
+
+        editor.textView.insertText("!", replacementRange: NSRange(location: 5, length: 0))
+        XCTAssertEqual(editor.text, "Hello")
+
+        editor.textView.insertText("i", replacementRange: NSRange(location: 4, length: 1))
+        XCTAssertEqual(editor.text, "Helli")
+    }
+
     func testFormattingReflectsTheCaretLine() {
         let editor = MarkdownEditorView(text: "## Heading\n> Quote\n**bold** and *it*\n```\ncode\n```\n")
         let source = editor.text as NSString

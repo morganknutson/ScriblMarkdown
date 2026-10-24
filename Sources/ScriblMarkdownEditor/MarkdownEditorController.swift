@@ -242,6 +242,11 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         shouldChangeTextIn affectedCharRange: NSRange,
         replacementString: String?
     ) -> Bool {
+        guard host?.shouldChangeText(
+            in: textView,
+            range: affectedCharRange,
+            replacement: replacementString
+        ) != false else { return false }
         let replacement = replacementString ?? ""
         let changesProtectedTitlePrefix = protectsLeadingTitle
             && textView.string.hasPrefix("# ")

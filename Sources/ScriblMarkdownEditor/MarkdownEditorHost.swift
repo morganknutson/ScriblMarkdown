@@ -81,6 +81,8 @@ public protocol MarkdownEditorHost: AnyObject {
     func linkedDocument(at url: URL) -> MarkdownLinkedDocument?
     /// Opens a linked document in place. Returns false to fall back to the system handler.
     func openLinkedDocument(at url: URL) -> Bool
+    /// Whether a source edit is allowed. Called before rendered objects are prepared.
+    func shouldChangeText(in textView: NSTextView, range: NSRange, replacement: String?) -> Bool
     func recordEditorEvent(_ message: String, metadata: [String: String])
 }
 
@@ -92,6 +94,7 @@ public extension MarkdownEditorHost {
 
     func linkedDocument(at url: URL) -> MarkdownLinkedDocument? { nil }
     func openLinkedDocument(at url: URL) -> Bool { false }
+    func shouldChangeText(in textView: NSTextView, range: NSRange, replacement: String?) -> Bool { true }
     func recordEditorEvent(_ message: String, metadata: [String: String]) {}
 }
 
