@@ -31,6 +31,9 @@ public final class MarkdownCodeBlockView: NSView {
     private var isExpanded = false
     private var isCollapsible = false
     private var previewPanel: MarkdownContentPreviewPanel?
+    /// The code ends the block, or the toggle below it does.
+    private var codeAtBottom: [NSLayoutConstraint] = []
+    private var toggleAtBottom: [NSLayoutConstraint] = []
 
     public init(theme: MarkdownTheme) {
         self.theme = theme
@@ -57,10 +60,14 @@ public final class MarkdownCodeBlockView: NSView {
             codeView.topAnchor.constraint(equalTo: header.bottomAnchor),
             codeView.leadingAnchor.constraint(equalTo: leadingAnchor),
             codeView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            toggleLabel.topAnchor.constraint(equalTo: codeView.bottomAnchor, constant: 2),
             toggleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            toggleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
         ])
+        codeAtBottom = [codeView.bottomAnchor.constraint(equalTo: bottomAnchor)]
+        toggleAtBottom = [
+            toggleLabel.topAnchor.constraint(equalTo: codeView.bottomAnchor, constant: 2),
+            toggleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+        ]
+        NSLayoutConstraint.activate(codeAtBottom)
         applyTheme()
     }
 
@@ -98,11 +105,10 @@ public final class MarkdownCodeBlockView: NSView {
     }
 
     private func updateToggle() {
-        guard isCollapsible else {
-            toggleLabel.isHidden = true
-            return
-        }
-        toggleLabel.isHidden = false
+        toggleLabel.isHidden = !isCollapsible
+        NSLayoutConstraint.deactivate(isCollapsible ? codeAtBottom : toggleAtBottom)
+        NSLayoutConstraint.activate(isCollapsible ? toggleAtBottom : codeAtBottom)
+        guard isCollapsible else { return }
         let hidden = code.components(separatedBy: "\n").count - Self.previewLineCount
         toggleLabel.stringValue = isExpanded ? "Show less" : "Show \(hidden) more lines"
     }
