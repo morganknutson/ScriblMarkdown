@@ -513,13 +513,15 @@ final class MarkdownEditorTextView: NSTextView {
                 toggleChecklist?(rendered.stateRange, !rendered.isChecked)
             }
         } else if let rendered = mouseDownImage, !didBeginImageDrag {
-            previewPanel = MarkdownImagePreviewPanel.present(
+            let panel = MarkdownImagePreviewPanel.present(
                 image: rendered.image,
-                originalData: try? Data(contentsOf: rendered.url),
+                originalData: nil,
                 mediaType: UTType(filenameExtension: rendered.url.pathExtension)?.preferredMIMEType,
                 title: rendered.url.deletingPathExtension().lastPathComponent,
                 from: self
             )
+            panel.loadOriginalData(from: rendered.url)
+            previewPanel = panel
         } else if mouseDownImage == nil {
             super.mouseUp(with: event)
         }

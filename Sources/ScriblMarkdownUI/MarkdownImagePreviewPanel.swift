@@ -54,6 +54,16 @@ public final class MarkdownImagePreviewPanel: NSPanel {
         makeKeyAndOrderFront(nil)
     }
 
+    /// Keep file I/O off the click handler; copy and save use the original bytes once loaded.
+    public func loadOriginalData(from url: URL) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let data = try? Data(contentsOf: url, options: .mappedIfSafe)
+            DispatchQueue.main.async { [weak self] in
+                self?.previewView.originalData = data
+            }
+        }
+    }
+
     /// Shows a preview over `view`'s window and returns it so the presenter can keep it.
     public static func present(
         image: NSImage,
@@ -143,7 +153,7 @@ final class MarkdownImagePreviewContentView: NSView {
 
     private let imageView = MarkdownAspectFitImageView()
     private let image: NSImage
-    private let originalData: Data?
+    var originalData: Data?
     private let mediaType: String?
     private let pasteboard: NSPasteboard
 

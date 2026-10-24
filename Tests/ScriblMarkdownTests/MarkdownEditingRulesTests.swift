@@ -2,6 +2,24 @@ import XCTest
 @testable import ScriblMarkdown
 
 final class MarkdownEditingRulesTests: XCTestCase {
+    func testLargeDocumentRenumbererReturnsLatestEditOnMainThread() {
+        let source = "1. first\n5. second\n" + String(repeating: "paragraph\n", count: 3_000)
+        let renumberer = MarkdownOrderedListRenumberer()
+        let cancelled = expectation(description: "superseded request")
+        cancelled.isInverted = true
+        let completed = expectation(description: "latest renumbering")
+
+        renumberer.schedule(in: source, selection: NSRange(location: 0, length: 0)) { _ in
+            cancelled.fulfill()
+        }
+        renumberer.schedule(in: source, selection: NSRange(location: 0, length: 0)) { edit in
+            XCTAssertTrue(Thread.isMainThread)
+            XCTAssertTrue(edit?.applied(to: source).hasPrefix("1. first\n2. second\n") == true)
+            completed.fulfill()
+        }
+        wait(for: [completed, cancelled], timeout: 2)
+    }
+
     /// Applies `edit` and returns the text with the selection marked by `|`.
     private func result(_ edit: MarkdownEdit?, in source: String) throws -> String {
         let edit = try XCTUnwrap(edit)

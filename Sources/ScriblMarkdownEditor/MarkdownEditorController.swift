@@ -29,6 +29,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
     /// Set while a shared editing rule's edit is applied, so the edit itself doesn't
     /// trigger typing shortcuts or renumbering.
     private var isApplyingRuleEdit = false
+    private let orderedListRenumberer = MarkdownOrderedListRenumberer()
     private var linkPopover: MarkdownLinkPopover?
     private var softBreakCharacterIndexes: Set<Int> = []
     private struct RenderedObjectGlyphLayout {
@@ -158,11 +159,23 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
 
     public func textDidChange(_ notification: Notification) {
         guard !isStyling, !isApplyingRuleEdit, let textView = notification.object as? NSTextView else { return }
-        if !textView.hasMarkedText(),
-           let renumber = MarkdownEditingRules.renumberOrderedLists(in: textView.string, selection: textView.selectedRange()) {
-            // Applying it finishes this change too.
-            apply(renumber, to: textView)
-            return
+        if !textView.hasMarkedText() {
+            let source = textView.string
+            if (source as NSString).length > MarkdownOrderedListRenumberer.backgroundThreshold {
+                orderedListRenumberer.schedule(in: source, selection: textView.selectedRange()) { [weak self, weak textView] edit in
+                    guard let self, let textView, textView.string == source, let edit else { return }
+                    self.apply(edit, to: textView)
+                }
+            } else {
+                orderedListRenumberer.cancel()
+                if let renumber = MarkdownEditingRules.renumberOrderedLists(in: source, selection: textView.selectedRange()) {
+                    // Applying it finishes this change too.
+                    apply(renumber, to: textView)
+                    return
+                }
+            }
+        } else {
+            orderedListRenumberer.cancel()
         }
         let bulletRanges = MarkdownListNormalizer.literalBulletMarkerRanges(in: textView.string)
         if let storage = textView.textStorage, !bulletRanges.isEmpty {
