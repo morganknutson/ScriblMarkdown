@@ -12,6 +12,8 @@ let package = Package(
         .library(name: "ScriblMarkdownHTML", targets: ["ScriblMarkdownHTML"]),
         // The shared AppKit look: theme, code/table/image block views and preview panels.
         .library(name: "ScriblMarkdownUI", targets: ["ScriblMarkdownUI"]),
+        // UIKit code and table overlays, with full-screen previews for iOS hosts.
+        .library(name: "ScriblMarkdownUIKit", targets: ["ScriblMarkdownUIKit"]),
         // The AppKit live-styling editor built on the parsers.
         .library(name: "ScriblMarkdownEditor", targets: ["ScriblMarkdownEditor"]),
         // Read-only AppKit rendering of a parsed document, for display surfaces.
@@ -24,11 +26,13 @@ let package = Package(
         .target(name: "ScriblMarkdown"),
         .target(name: "ScriblMarkdownHTML", dependencies: ["ScriblMarkdown", "SwiftSoup"]),
         .target(name: "ScriblMarkdownUI", dependencies: ["ScriblMarkdown"]),
+        .target(name: "ScriblMarkdownUIKit", dependencies: ["ScriblMarkdown"]),
         .target(name: "ScriblMarkdownRenderer", dependencies: ["ScriblMarkdown", "ScriblMarkdownUI"]),
         .target(name: "ScriblMarkdownEditor", dependencies: ["ScriblMarkdown", "ScriblMarkdownHTML", "ScriblMarkdownUI", "ScriblMarkdownRenderer"]),
         .testTarget(name: "ScriblMarkdownTests", dependencies: ["ScriblMarkdown"]),
         .testTarget(name: "ScriblMarkdownHTMLTests", dependencies: ["ScriblMarkdownHTML"]),
         .testTarget(name: "ScriblMarkdownUITests", dependencies: ["ScriblMarkdownUI"]),
+        .testTarget(name: "ScriblMarkdownUIKitTests", dependencies: ["ScriblMarkdownUIKit"]),
         .testTarget(name: "ScriblMarkdownEditorTests", dependencies: ["ScriblMarkdownEditor"]),
         .testTarget(name: "ScriblMarkdownRendererTests", dependencies: ["ScriblMarkdownRenderer"])
     ]
