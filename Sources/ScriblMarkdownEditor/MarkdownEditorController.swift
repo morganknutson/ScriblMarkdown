@@ -162,10 +162,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         if !textView.hasMarkedText() {
             let source = textView.string
             if (source as NSString).length > MarkdownOrderedListRenumberer.backgroundThreshold {
-                orderedListRenumberer.schedule(in: source, selection: textView.selectedRange()) { [weak self, weak textView] edit in
-                    guard let self, let textView, textView.string == source, let edit else { return }
-                    self.apply(edit, to: textView)
-                }
+                scheduleOrderedListRenumbering(in: textView)
             } else {
                 orderedListRenumberer.cancel()
                 if let renumber = MarkdownEditingRules.renumberOrderedLists(in: source, selection: textView.selectedRange()) {
@@ -190,6 +187,19 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         onTextChange?(textView.string)
         applyPresentation(to: textView)
         (textView as? MarkdownEditorTextView)?.finishTextChange()
+    }
+
+    private func scheduleOrderedListRenumbering(in textView: NSTextView) {
+        let source = textView.string
+        let selection = textView.selectedRange()
+        orderedListRenumberer.schedule(in: source, selection: selection) { [weak self, weak textView] edit in
+            guard let self, let textView, textView.string == source, !textView.hasMarkedText() else { return }
+            guard textView.selectedRange() == selection else {
+                self.scheduleOrderedListRenumbering(in: textView)
+                return
+            }
+            if let edit { self.apply(edit, to: textView) }
+        }
     }
 
     public func textViewDidChangeSelection(_ notification: Notification) {

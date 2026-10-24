@@ -23,12 +23,21 @@ public struct UIKitMarkdownTheme {
     public var syntaxOperator: UIColor
     public var text: UIColor
     public var secondaryText: UIColor
+    public var tertiaryText: UIColor
+    public var link: UIColor
+    public var accent: UIColor
+    public var separator: UIColor
+    public var onAccent: UIColor
+    public var keycapBackground: UIColor
+    public var keycapBorder: UIColor
+    public var footnoteRule: UIColor
     public var previewBackground: UIColor
     public var codeFont: UIFont
     public var headerFont: UIFont
     public var tableFont: UIFont
     public var tableHeaderFont: UIFont
     public var cornerRadius: CGFloat
+    public var imageCornerRadius: CGFloat
     public var borderWidth: CGFloat
 
     public init(
@@ -50,12 +59,21 @@ public struct UIKitMarkdownTheme {
         syntaxOperator: UIColor,
         text: UIColor = .label,
         secondaryText: UIColor = .secondaryLabel,
+        tertiaryText: UIColor = .tertiaryLabel,
+        link: UIColor = .link,
+        accent: UIColor = .tintColor,
+        separator: UIColor = .separator,
+        onAccent: UIColor = .white,
+        keycapBackground: UIColor = UIColor.label.withAlphaComponent(0.10),
+        keycapBorder: UIColor = UIColor.separator.withAlphaComponent(0.72),
+        footnoteRule: UIColor = UIColor.separator.withAlphaComponent(0.65),
         previewBackground: UIColor = .systemBackground,
         codeFont: UIFont = .monospacedSystemFont(ofSize: MarkdownVisualSpec.referenceCodeSize, weight: .regular),
         headerFont: UIFont = .systemFont(ofSize: 11, weight: .medium),
         tableFont: UIFont = .systemFont(ofSize: 14),
         tableHeaderFont: UIFont = .systemFont(ofSize: 14, weight: .semibold),
         cornerRadius: CGFloat = 8,
+        imageCornerRadius: CGFloat = 10,
         borderWidth: CGFloat = 1
     ) {
         self.inlineCodeBackground = inlineCodeBackground
@@ -76,12 +94,21 @@ public struct UIKitMarkdownTheme {
         self.syntaxOperator = syntaxOperator
         self.text = text
         self.secondaryText = secondaryText
+        self.tertiaryText = tertiaryText
+        self.link = link
+        self.accent = accent
+        self.separator = separator
+        self.onAccent = onAccent
+        self.keycapBackground = keycapBackground
+        self.keycapBorder = keycapBorder
+        self.footnoteRule = footnoteRule
         self.previewBackground = previewBackground
         self.codeFont = codeFont
         self.headerFont = headerFont
         self.tableFont = tableFont
         self.tableHeaderFont = tableHeaderFont
         self.cornerRadius = cornerRadius
+        self.imageCornerRadius = imageCornerRadius
         self.borderWidth = borderWidth
     }
 
