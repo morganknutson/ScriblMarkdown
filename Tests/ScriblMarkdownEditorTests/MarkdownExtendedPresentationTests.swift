@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import XCTest
 import ScriblMarkdown
@@ -492,3 +493,4 @@ final class MarkdownExtendedPresentationTests: XCTestCase {
         )
     }
 }
+#endif

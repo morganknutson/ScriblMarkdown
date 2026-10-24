@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import Foundation
 import ScriblMarkdown
@@ -67,3 +68,4 @@ public extension MarkdownImageAssetStore {
         return markdown(destination: destination, alternateText: "Pasted Image")
     }
 }
+#endif

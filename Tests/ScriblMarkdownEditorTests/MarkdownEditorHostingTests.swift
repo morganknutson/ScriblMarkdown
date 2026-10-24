@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import XCTest
 import ScriblMarkdown
@@ -134,3 +135,26 @@ private final class RecordingHighlighter: MarkdownCodeHighlighting {
         return [MarkdownCodeColorRun(range: NSRange(location: 0, length: 3), color: .systemPink)]
     }
 }
+#endif
+
+#if os(macOS)
+@MainActor
+final class MarkdownEditorScrollingTests: XCTestCase {
+    func testDisablingScrollingHidesTheScrollerAndForwardsScrollWheel() throws {
+        let editor = MarkdownEditorView(text: "Body")
+        let receiver = ScrollRecorder()
+        editor.nextResponder = receiver
+        editor.isScrollingEnabled = false
+
+        XCTAssertFalse(editor.hasVerticalScroller)
+        let event = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -5, wheel2: 0, wheel3: 0))
+        editor.scrollWheel(with: try XCTUnwrap(NSEvent(cgEvent: event)))
+        XCTAssertEqual(receiver.scrollCount, 1)
+    }
+}
+
+private final class ScrollRecorder: NSResponder {
+    private(set) var scrollCount = 0
+    override func scrollWheel(with event: NSEvent) { scrollCount += 1 }
+}
+#endif

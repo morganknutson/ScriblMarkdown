@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import ScriblMarkdown
 
@@ -2817,3 +2818,4 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         textView.setSelectedRange(NSRange(location: lineRange.location, length: (replacement as NSString).length))
     }
 }
+#endif

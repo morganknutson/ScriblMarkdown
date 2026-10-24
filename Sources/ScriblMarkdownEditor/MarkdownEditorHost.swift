@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 
 /// A public web page's preview, shown on a bare link's card.
@@ -104,3 +105,4 @@ public enum MarkdownEditorTitlePolicy: Equatable {
     /// The `# ` prefix can't be deleted, and an empty title shows `placeholder`.
     case protectedLeadingHeading(placeholder: String)
 }
+#endif

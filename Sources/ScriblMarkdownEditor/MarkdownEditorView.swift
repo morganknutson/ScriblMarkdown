@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import ScriblMarkdown
 
@@ -39,6 +40,16 @@ public final class MarkdownEditorView: NSScrollView {
             markdownTextView.textContainerInset = newValue.textContainerInset
             controller.applyPresentation(to: markdownTextView)
             controller.refreshPresentationLayout(in: markdownTextView)
+        }
+    }
+
+    /// When false the editor never scrolls itself: it hides its scroller and passes
+    /// scroll-wheel events on, for hosts that size it to its content inside their own
+    /// scroll view.
+    public var isScrollingEnabled = true {
+        didSet {
+            hasVerticalScroller = isScrollingEnabled
+            verticalScrollElasticity = isScrollingEnabled ? .automatic : .none
         }
     }
 
@@ -104,9 +115,18 @@ public final class MarkdownEditorView: NSScrollView {
         scrollToTop()
     }
 
+    public override func scrollWheel(with event: NSEvent) {
+        guard isScrollingEnabled else {
+            nextResponder?.scrollWheel(with: event)
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+
     public func scrollToTop() {
         let clipView = contentView
         clipView.scroll(to: NSPoint(x: clipView.bounds.minX, y: 0))
         reflectScrolledClipView(clipView)
     }
 }
+#endif

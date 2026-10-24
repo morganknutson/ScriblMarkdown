@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import Foundation
 import XCTest
@@ -134,3 +135,4 @@ final class MarkdownArtifactSupportTests: XCTestCase {
         return reference.state
     }
 }
+#endif

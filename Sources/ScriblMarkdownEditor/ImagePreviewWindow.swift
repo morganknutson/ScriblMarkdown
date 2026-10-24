@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 
 @MainActor
@@ -115,3 +116,4 @@ final class ImagePreviewWindowController: NSObject, NSWindowDelegate {
         self.previewWindow = nil
     }
 }
+#endif

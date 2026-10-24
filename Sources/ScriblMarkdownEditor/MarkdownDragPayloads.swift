@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import Foundation
 import ScriblMarkdown
@@ -65,3 +66,4 @@ struct ArtifactReorderDragPayload: Codable, Equatable, Sendable {
 
     var range: NSRange { NSRange(location: blockLocation, length: blockLength) }
 }
+#endif

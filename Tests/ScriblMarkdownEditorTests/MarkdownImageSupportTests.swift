@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import XCTest
 import ScriblMarkdown
@@ -420,3 +421,4 @@ final class MarkdownImageSupportTests: XCTestCase {
         XCTAssertEqual(textView.selectedRange(), NSRange(location: 1, length: 0))
     }
 }
+#endif

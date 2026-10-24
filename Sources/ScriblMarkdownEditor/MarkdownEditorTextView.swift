@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import Foundation
 import ScriblMarkdown
@@ -1408,3 +1409,4 @@ final class MarkdownEditorTextView: NSTextView {
         }
     }
 }
+#endif

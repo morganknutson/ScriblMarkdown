@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 @testable import ScriblMarkdownEditor
 
@@ -50,3 +51,4 @@ extension MarkdownLinkedDocument {
         )
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import Foundation
 import ScriblMarkdown
@@ -401,3 +402,4 @@ private final class ArtifactMediaImageView: NSImageView {
         NSGraphicsContext.restoreGraphicsState()
     }
 }
+#endif

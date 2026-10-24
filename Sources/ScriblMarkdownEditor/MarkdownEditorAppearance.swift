@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 
 /// The colors the editor draws with. `.system` follows AppKit's semantic colors;
@@ -135,3 +136,4 @@ public struct MarkdownEditorFormatting: Equatable {
         self.isCodeBlock = isCodeBlock
     }
 }
+#endif
