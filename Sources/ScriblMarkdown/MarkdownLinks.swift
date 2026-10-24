@@ -8,6 +8,11 @@ public struct MarkdownStyledLink: Equatable {
 }
 
 public struct MarkdownLinkPresentation: Equatable {
+    private static let angleURLPattern = try! NSRegularExpression(pattern: #"<(https?://[^\s<>]+)>"#, options: .caseInsensitive)
+    private static let bareURLPattern = try! NSRegularExpression(pattern: #"https?://[^\s<>]+"#, options: .caseInsensitive)
+    private static let referenceDefinitionPattern = try! NSRegularExpression(
+        pattern: #"^[ \t]{0,3}\[([^\]^][^\]]*)\]:[ \t]*(.+?)[ \t]*$"#
+    )
     public let links: [MarkdownStyledLink]
     public let definitionRanges: [NSRange]
 
@@ -129,7 +134,57 @@ public struct MarkdownLinkPresentation: Equatable {
             links.append(parsed)
             cursor = NSMaxRange(parsed.sourceRange)
         }
+        links += autolinks(in: markdown, excluding: protectedRanges + links.map(\.sourceRange))
+        links.sort { $0.sourceRange.location < $1.sourceRange.location }
         return Self(links: links, definitionRanges: definitionRanges)
+    }
+
+    private static func autolinks(in markdown: String, excluding excludedRanges: [NSRange]) -> [MarkdownStyledLink] {
+        guard markdown.range(of: "http", options: .caseInsensitive) != nil else { return [] }
+        let source = markdown as NSString
+        let fullRange = NSRange(location: 0, length: source.length)
+        var links: [MarkdownStyledLink] = []
+
+        for match in angleURLPattern.matches(in: markdown, range: fullRange) {
+            guard !excludedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { continue }
+            let destination = source.substring(with: match.range(at: 1))
+            guard isWebURL(destination) else { continue }
+            links.append(.init(
+                sourceRange: match.range,
+                labelRange: match.range(at: 1),
+                markerRanges: [
+                    NSRange(location: match.range.location, length: 1),
+                    NSRange(location: NSMaxRange(match.range) - 1, length: 1)
+                ],
+                destination: destination
+            ))
+        }
+
+        let occupied = excludedRanges + links.map(\.sourceRange)
+        for match in bareURLPattern.matches(in: markdown, range: fullRange) {
+            guard !occupied.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { continue }
+            var destination = source.substring(with: match.range)
+            while let last = destination.last {
+                let unmatchedParenthesis = last == ")" &&
+                    destination.filter({ $0 == ")" }).count > destination.filter({ $0 == "(" }).count
+                let unmatchedBracket = last == "]" &&
+                    destination.filter({ $0 == "]" }).count > destination.filter({ $0 == "[" }).count
+                guard ".,;:!?".contains(last) || unmatchedParenthesis || unmatchedBracket else { break }
+                destination.removeLast()
+            }
+            guard !destination.isEmpty, isWebURL(destination) else { continue }
+            let range = NSRange(location: match.range.location, length: (destination as NSString).length)
+            links.append(.init(sourceRange: range, labelRange: range, markerRanges: [], destination: destination))
+        }
+        return links
+    }
+
+    private static func isWebURL(_ value: String) -> Bool {
+        guard let components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              components.host?.isEmpty == false else { return false }
+        return true
     }
 
     private struct ReferenceDefinition {
@@ -142,9 +197,6 @@ public struct MarkdownLinkPresentation: Equatable {
         in source: NSString,
         excluding excludedRanges: [NSRange]
     ) -> [ReferenceDefinition] {
-        let expression = try! NSRegularExpression(
-            pattern: #"^[ \t]{0,3}\[([^\]^][^\]]*)\]:[ \t]*(.+?)[ \t]*$"#
-        )
         var result: [ReferenceDefinition] = []
         var location = 0
         while location < source.length {
@@ -162,7 +214,7 @@ public struct MarkdownLinkPresentation: Equatable {
             let localRange = NSRange(location: 0, length: (line as NSString).length)
             if !excludedRanges.contains(where: {
                 NSIntersectionRange($0, contentRange).length > 0
-            }), let match = expression.firstMatch(in: line, range: localRange),
+            }), let match = referenceDefinitionPattern.firstMatch(in: line, range: localRange),
                let destination = destination(
                 from: (line as NSString).substring(with: match.range(at: 2))
                ) {
@@ -245,6 +297,10 @@ public struct MarkdownLinkPresentation: Equatable {
 }
 
 public struct MarkdownFootnotePresentation: Equatable {
+    private static let definitionExpression = try! NSRegularExpression(
+        pattern: #"(?m)^(\[\^([^\]\r\n]+)\]:[ \t]*)([^\r\n]*)$"#
+    )
+    private static let referenceExpression = try! NSRegularExpression(pattern: #"\[\^([^\]\r\n]+)\]"#)
     public struct Reference: Equatable {
         public let sourceRange: NSRange
         public let label: String
@@ -267,9 +323,7 @@ public struct MarkdownFootnotePresentation: Equatable {
     public static func parse(in markdown: String, excluding excludedRanges: [NSRange]) -> Self {
         let source = markdown as NSString
         let fullRange = NSRange(location: 0, length: source.length)
-        let definitionExpression = try! NSRegularExpression(
-            pattern: #"(?m)^(\[\^([^\]\r\n]+)\]:[ \t]*)([^\r\n]*)$"#
-        )
+        let definitionExpression = Self.definitionExpression
         let definitionMatches = definitionExpression.matches(in: markdown, range: fullRange)
             .filter { match in
                 !excludedRanges.contains {
@@ -277,7 +331,7 @@ public struct MarkdownFootnotePresentation: Equatable {
                 }
             }
         let definitionRanges = definitionMatches.map(\.range)
-        let referenceExpression = try! NSRegularExpression(pattern: #"\[\^([^\]\r\n]+)\]"#)
+        let referenceExpression = Self.referenceExpression
         let referenceMatches = referenceExpression.matches(in: markdown, range: fullRange)
             .filter { match in
                 !(excludedRanges + definitionRanges).contains {

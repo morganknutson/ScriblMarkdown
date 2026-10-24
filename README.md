@@ -31,3 +31,23 @@ colors (`MarkdownCodeHighlighting`) and diagnostics. Every requirement has a def
 for toolbars; `onSelectionChange` says when to read it. `MarkdownInsertion` holds the
 source edits behind commands like `.link` and `.horizontalRule`, so other editor surfaces
 (Scribl's iOS editor) apply exactly the same Markdown.
+
+## Displaying Markdown
+
+`MarkdownDocument(parsing:)` produces blocks for paragraphs, ATX headings, lists,
+quotes, code fences, tables, images, footnotes, `<details><summary>…</summary>…</details>`
+and multiline `$$` math. Details have an inline summary and a nested body document.
+`MarkdownHTMLRenderer` produces semantic HTML, while `MarkdownAttributedRenderer`
+produces AppKit text or sections for hosts with their own code, table and image views.
+Inline links include `<https://…>` and bare HTTP(S) URLs; sentence punctuation stays
+outside the link.
+
+Display follows the live editor: setext headings and single-column tables remain
+ordinary text. HTML comments are omitted. The editor's `MarkdownMathDisplay` supplies
+the display text for math blocks.
+
+For a host that repeatedly renders a growing document, keep a `MarkdownRenderCache`
+with that surface and pass it to `attributedString(for:cache:)` or
+`segments(for:cache:)`. The cache reuses unchanged blocks in the same position and
+checks their neighbors and footnote numbering. Call `invalidate()` whenever the
+`MarkdownRenderStyle` or link resolver changes. Calls without a cache behave as before.

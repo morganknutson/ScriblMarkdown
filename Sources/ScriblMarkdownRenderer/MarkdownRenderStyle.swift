@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 
 /// How a rendered Markdown document looks. Hosts build one per surface (a chat message,
@@ -121,3 +122,4 @@ public struct MarkdownRenderStyle {
         bulletSymbols[min(depth, bulletSymbols.count - 1)]
     }
 }
+#endif

@@ -2,12 +2,13 @@ import Foundation
 import UniformTypeIdentifiers
 
 public struct MarkdownImageReference: Equatable {
+    private static let referenceExpression = try! NSRegularExpression(pattern: #"!\[([^\]\n]*)\]\(([^)\n]+)\)"#)
     public let range: NSRange
     public let alternateText: String
     public let destination: String
 
     public static func references(in markdown: String) -> [Self] {
-        let expression = try! NSRegularExpression(pattern: #"!\[([^\]\n]*)\]\(([^)\n]+)\)"#)
+        let expression = Self.referenceExpression
         let fullRange = NSRange(location: 0, length: (markdown as NSString).length)
         return expression.matches(in: markdown, range: fullRange).compactMap { match in
             guard match.numberOfRanges == 3 else { return nil }

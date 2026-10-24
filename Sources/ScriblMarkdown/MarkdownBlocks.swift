@@ -1,6 +1,14 @@
 import Foundation
 
 public struct MarkdownDetailsBlock: Equatable {
+    private static let blockExpression = try! NSRegularExpression(
+        pattern: #"(<details\b([^>]*)>)(?:[ \t]*\r?\n)?[ \t]*(<summary>)(.*?)(</summary>)(?:[ \t]*\r?\n)?(.*?)(?:\r?\n)?[ \t]*(</details>)"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators]
+    )
+    private static let openExpression = try! NSRegularExpression(
+        pattern: #"(?:^|\s)open(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+))?(?=\s|$)"#,
+        options: .caseInsensitive
+    )
     public let sourceRange: NSRange
     public let openingTagRange: NSRange
     public let summaryOpeningRange: NSRange
@@ -16,10 +24,7 @@ public struct MarkdownDetailsBlock: Equatable {
 
     public static func blocks(in markdown: String, excluding excludedRanges: [NSRange]) -> [Self] {
         let source = markdown as NSString
-        let expression = try! NSRegularExpression(
-            pattern: #"(<details\b([^>]*)>)(?:[ \t]*\r?\n)?[ \t]*(<summary>)(.*?)(</summary>)(?:[ \t]*\r?\n)?(.*?)(?:\r?\n)?[ \t]*(</details>)"#,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        )
+        let expression = Self.blockExpression
         return expression.matches(
             in: markdown,
             range: NSRange(location: 0, length: source.length)
@@ -28,10 +33,7 @@ public struct MarkdownDetailsBlock: Equatable {
                 NSIntersectionRange($0, match.range).length > 0
             }) else { return nil }
             let attributes = source.substring(with: match.range(at: 2))
-            let openExpression = try! NSRegularExpression(
-                pattern: #"(?:^|\s)open(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+))?(?=\s|$)"#,
-                options: .caseInsensitive
-            )
+            let openExpression = Self.openExpression
             let isExpanded = openExpression.firstMatch(
                 in: attributes,
                 range: NSRange(location: 0, length: (attributes as NSString).length)
@@ -155,6 +157,9 @@ public enum MarkdownEntityDecoder {
 }
 
 public struct MarkdownCodeBlock: Equatable {
+    private static let listMarkerExpression = try! NSRegularExpression(
+        pattern: #"^(?:[-*+](?:[ \t]+|$)|\d+\.(?:[ \t]+|$))"#
+    )
     public let sourceRange: NSRange
     public let contentRange: NSRange
     public let openingRange: NSRange?
@@ -299,9 +304,7 @@ public struct MarkdownCodeBlock: Equatable {
         }
         let remainder = line.substring(from: 4)
             .trimmingCharacters(in: .whitespaces)
-        let listMarker = try! NSRegularExpression(
-            pattern: #"^(?:[-*+](?:[ \t]+|$)|\d+\.(?:[ \t]+|$))"#
-        )
+        let listMarker = Self.listMarkerExpression
         if listMarker.firstMatch(
             in: remainder,
             range: NSRange(location: 0, length: (remainder as NSString).length)
@@ -314,6 +317,9 @@ public struct MarkdownCodeBlock: Equatable {
 }
 
 public struct MarkdownTable: Equatable {
+    private static let delimiterExpression = try! NSRegularExpression(
+        pattern: #"^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$"#
+    )
     public struct Row: Equatable {
         public let lineRange: NSRange
         public let cells: [NSRange]
@@ -343,9 +349,7 @@ public struct MarkdownTable: Equatable {
             location = NSMaxRange(lineRange)
         }
 
-        let delimiter = try! NSRegularExpression(
-            pattern: #"^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$"#
-        )
+        let delimiter = Self.delimiterExpression
         var tables: [Self] = []
         var index = 0
         while index + 1 < lines.count {
@@ -443,6 +447,7 @@ public struct MarkdownTable: Equatable {
 }
 
 public enum MarkdownMathDisplay {
+    private static let superscriptExpression = try! NSRegularExpression(pattern: #"\^\{?([0-9+\-]+)\}?"#)
     public static func text(for source: String) -> String {
         var result = source
             .replacingOccurrences(of: #"\pm"#, with: "±")
@@ -459,7 +464,7 @@ public enum MarkdownMathDisplay {
             "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
             "+": "⁺", "-": "⁻"
         ]
-        let expression = try! NSRegularExpression(pattern: #"\^\{?([0-9+\-]+)\}?"#)
+        let expression = Self.superscriptExpression
         let mutable = NSMutableString(string: result)
         for match in expression.matches(
             in: result,

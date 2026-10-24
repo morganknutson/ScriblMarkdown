@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 
 extension NSAttributedString.Key {
@@ -33,3 +34,4 @@ public final class MarkdownQuoteBarLayoutManager: NSLayoutManager {
         }
     }
 }
+#endif

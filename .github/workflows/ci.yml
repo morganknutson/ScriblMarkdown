@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test package
+        run: swift test
+      - name: Build core for iOS Simulator
+        run: |
+          mkdir -p "$RUNNER_TEMP/ScriblMarkdown.xcworkspace"
+          cat > "$RUNNER_TEMP/ScriblMarkdown.xcworkspace/contents.xcworkspacedata" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Workspace version="1.0">
+            <FileRef location="absolute:$GITHUB_WORKSPACE"></FileRef>
+          </Workspace>
+          EOF
+          xcodebuild -workspace "$RUNNER_TEMP/ScriblMarkdown.xcworkspace" \
+            -scheme ScriblMarkdown -destination 'generic/platform=iOS Simulator' \
+            build CODE_SIGNING_ALLOWED=NO

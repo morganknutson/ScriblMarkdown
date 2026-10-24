@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import XCTest
 import ScriblMarkdown
@@ -11,6 +12,114 @@ final class MarkdownAttributedRendererTests: XCTestCase {
         textColor: .labelColor,
         quoteBarColor: .systemBlue
     ))
+
+    func testRendersDetailsMathAndAutolinks() throws {
+        let document = MarkdownDocument(parsing: """
+        <details><summary>**More** info</summary>
+        Body with https://a.dev.
+        </details>
+
+        $$
+        x^2
+        $$
+        """)
+        let text = renderer.attributedString(for: document)
+        XCTAssertEqual(text.string, "More info\nBody with https://a.dev.\nx²")
+        let ns = text.string as NSString
+        let summaryFont = try XCTUnwrap(text.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        XCTAssertTrue(summaryFont.fontDescriptor.symbolicTraits.contains(.bold))
+        let bodyStart = ns.range(of: "Body").location
+        let bodyStyle = try XCTUnwrap(text.attribute(.paragraphStyle, at: bodyStart, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertGreaterThan(bodyStyle.headIndent, 0)
+        let linkStart = ns.range(of: "https://a.dev").location
+        XCTAssertEqual(text.attribute(.link, at: linkStart, effectiveRange: nil) as? URL, URL(string: "https://a.dev"))
+        let mathStart = ns.range(of: "x²").location
+        let mathStyle = try XCTUnwrap(text.attribute(.paragraphStyle, at: mathStart, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertEqual(mathStyle.alignment, .center)
+    }
+
+    func testCacheTracksNeighborsAndCanBeInvalidated() {
+        let cache = MarkdownRenderCache()
+        let first = MarkdownDocument(parsing: "# Heading\n\nOne")
+        let cold = renderer.attributedString(for: first, cache: cache)
+        let warm = renderer.attributedString(for: first, cache: cache)
+        XCTAssertEqual(cold, warm)
+        let grown = MarkdownDocument(parsing: "# Heading\n\nOne\n\nTwo")
+        XCTAssertEqual(renderer.attributedString(for: grown, cache: cache),
+                       renderer.attributedString(for: grown))
+        cache.invalidate()
+        var newStyle = renderer.style
+        newStyle.textColor = .systemRed
+        let changed = MarkdownAttributedRenderer(style: newStyle).attributedString(for: grown, cache: cache)
+        XCTAssertEqual(changed.attribute(.foregroundColor, at: (changed.string as NSString).range(of: "One").location, effectiveRange: nil) as? NSColor, .systemRed)
+    }
+
+    func testCacheKeepsSeparateTextSections() {
+        let document = MarkdownDocument(parsing: "Before\n\n```\ncode\n```\n\nAfter")
+        let cache = MarkdownRenderCache()
+        let segments = renderer.segments(for: document, cache: cache)
+        XCTAssertEqual(segments.count, 3)
+        guard case .text(let first) = segments[0],
+              case .text(let last) = segments[2] else {
+            return XCTFail("Expected text sections")
+        }
+        XCTAssertEqual(first.string, "Before")
+        XCTAssertEqual(last.string, "After")
+        XCTAssertNotNil(cache.value(at: 0, scope: 1, block: .paragraph("Before"),
+                                    previous: nil, next: nil, footnoteOrdinals: [:]))
+        XCTAssertNotNil(cache.value(at: 0, scope: 3, block: .paragraph("After"),
+                                    previous: nil, next: nil, footnoteOrdinals: [:]))
+    }
+
+    func testUncachedRenderPerformance() {
+        let document = performanceDocument()
+        measure { _ = renderer.attributedString(for: document) }
+    }
+
+    func testCachedRenderPerformance() {
+        let document = performanceDocument()
+        let cache = MarkdownRenderCache()
+        _ = renderer.attributedString(for: document, cache: cache)
+        measure { _ = renderer.attributedString(for: document, cache: cache) }
+    }
+
+    private func performanceDocument() -> MarkdownDocument {
+        let markdown = Array(repeating: "# Heading\nParagraph **bold** with https://a.dev.\n- Item", count:500)
+            .joined(separator: "\n\n")
+        return MarkdownDocument(parsing: markdown)
+    }
+
+    func testLargeDocumentParseAndRenderPerformance() {
+        let sample = """
+        # Heading
+        Paragraph with **strong** and https://example.com.
+        - Bullet
+        1. Ordered
+        - [x] Task
+        > Quote
+        Note[^n].
+        [^n]: Footnote.
+        ---
+        ![Image](image.png)
+        | A | B |
+        |---|---|
+        | one | two |
+        ```swift
+        print("hi")
+        ```
+        <details><summary>Summary</summary>
+        Body.
+        </details>
+        $$
+        x^2
+        $$
+        """
+        let markdown = Array(repeating: sample, count: 100).joined(separator: "\n\n")
+        measure {
+            let document = MarkdownDocument(parsing: markdown)
+            _ = renderer.attributedString(for: document)
+        }
+    }
 
     func testSegmentsSplitOutCodeTablesAndImages() {
         let document = MarkdownDocument(parsing: "Intro\n\n```\ncode\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![x](x.png)\n\nOutro")
@@ -81,3 +190,4 @@ extension MarkdownAttributedRendererTests {
         }
     }
 }
+#endif

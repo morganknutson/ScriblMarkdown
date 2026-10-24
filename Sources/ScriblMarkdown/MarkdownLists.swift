@@ -56,6 +56,8 @@ public enum MarkdownListNormalizer {
 }
 
 public struct MarkdownOrderedListItem: Equatable {
+    private static let orderedExpression = try! NSRegularExpression(pattern: #"^([ \t]*)(\d+)(\.[ \t]+)([^\r\n]*)$"#)
+    private static let listExpression = try! NSRegularExpression(pattern: #"^[ \t]*(?:[-*+]|\d+\.)[ \t]+"#)
     public let markerRange: NSRange
     public let indentationRange: NSRange
     public let numberRange: NSRange
@@ -85,12 +87,8 @@ public struct MarkdownOrderedListItem: Equatable {
 
     public static func items(in source: String) -> [MarkdownOrderedListItem] {
         let string = source as NSString
-        let orderedExpression = try! NSRegularExpression(
-            pattern: #"^([ \t]*)(\d+)(\.[ \t]+)([^\r\n]*)$"#
-        )
-        let listExpression = try! NSRegularExpression(
-            pattern: #"^[ \t]*(?:[-*+]|\d+\.)[ \t]+"#
-        )
+        let orderedExpression = Self.orderedExpression
+        let listExpression = Self.listExpression
         var location = 0
         var fenceMarker: unichar?
         var listID = 0
@@ -223,6 +221,9 @@ public struct MarkdownOrderedListItem: Equatable {
 }
 
 public struct MarkdownChecklistItem: Equatable {
+    private static let itemExpression = try! NSRegularExpression(
+        pattern: #"(?m)^(([ \t]*)[-*+][ \t]+\[([ xX])\][ \t]+)([^\r\n]*)"#
+    )
     public let markerRange: NSRange
     public let indentationRange: NSRange
     public let stateRange: NSRange
@@ -230,9 +231,7 @@ public struct MarkdownChecklistItem: Equatable {
     public let isChecked: Bool
 
     public static func items(in source: String) -> [MarkdownChecklistItem] {
-        let expression = try! NSRegularExpression(
-            pattern: #"(?m)^(([ \t]*)[-*+][ \t]+\[([ xX])\][ \t]+)([^\r\n]*)"#
-        )
+        let expression = Self.itemExpression
         let string = source as NSString
         return expression.matches(
             in: source,
@@ -251,6 +250,8 @@ public struct MarkdownChecklistItem: Equatable {
 }
 
 public struct MarkdownBlockQuoteLine: Equatable {
+    private static let unorderedMarker = try! NSRegularExpression(pattern: #"^([-*+][ \t]+)"#)
+    private static let orderedMarker = try! NSRegularExpression(pattern: #"^(\d+\.[ \t]+)"#)
     public enum ListMarker: Equatable {
         case unordered(range: NSRange)
         case ordered(range: NSRange)
@@ -337,8 +338,8 @@ public struct MarkdownBlockQuoteLine: Equatable {
     private static func listMarker(in source: NSString, contentRange: NSRange) -> ListMarker? {
         guard contentRange.length > 1 else { return nil }
         let content = source.substring(with: contentRange)
-        let unordered = try! NSRegularExpression(pattern: #"^([-*+][ \t]+)"#)
-        let ordered = try! NSRegularExpression(pattern: #"^(\d+\.[ \t]+)"#)
+        let unordered = Self.unorderedMarker
+        let ordered = Self.orderedMarker
         let localRange = NSRange(location: 0, length: (content as NSString).length)
         if let match = unordered.firstMatch(in: content, range: localRange) {
             return .unordered(range: NSRange(

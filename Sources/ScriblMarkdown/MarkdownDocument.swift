@@ -56,6 +56,8 @@ public enum MarkdownBlock: Equatable, Sendable {
     case image(source: String, alternateText: String)
     case thematicBreak
     case footnote(label: String, ordinal: Int, text: String)
+    indirect case details(summary: String, body: MarkdownDocument, isExpanded: Bool)
+    case math(String)
 }
 
 /// A display section of a `MarkdownDocument`; see `MarkdownDocument.sections`.
@@ -69,8 +71,7 @@ public enum MarkdownDocumentSection: Equatable, Sendable {
 /// Markdown parsed into display blocks with the same parsers the live editor uses, so a
 /// document reads the same in Scribl's editor, Addy's views and any other renderer.
 ///
-/// Display semantics: HTML comments are dropped. `<details>` and `$$` math are not given
-/// their own blocks yet and read as paragraphs.
+/// Display semantics: HTML comments are dropped. Details and display math are text blocks.
 public struct MarkdownDocument: Equatable, Sendable {
     public let blocks: [MarkdownBlock]
     /// Footnote labels mapped to their display numbers, for `MarkdownInlineParser`.
@@ -133,6 +134,11 @@ public struct MarkdownDocument: Equatable, Sendable {
                 }
             case .footnote(_, let ordinal, let text):
                 lines.append("\(ordinal). " + inlinePlainText(text))
+            case .details(let summary, let body, _):
+                lines.append(inlinePlainText(summary))
+                lines.append(body.plainText(includingCode: includingCode))
+            case .math(let source):
+                lines.append(MarkdownMathDisplay.text(for: source))
             case .image, .thematicBreak:
                 continue
             }
@@ -156,6 +162,10 @@ private struct MarkdownDocumentParser {
     private static let headingPattern = try! NSRegularExpression(pattern: #"^[ \t]{0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*#*[ \t]*$"#)
     private static let quotePattern = try! NSRegularExpression(pattern: #"^[ \t]{0,3}((?:>[ \t]?)+)(.*)$"#)
     private static let bulletPattern = try! NSRegularExpression(pattern: #"^([ \t]*)[-*+][ \t]+(.*)$"#)
+    private static let mathPattern = try! NSRegularExpression(
+        pattern: #"^\$\$[ \t]*\r?\n(.*?)\r?\n\$\$[ \t]*$"#,
+        options: [.anchorsMatchLines, .dotMatchesLineSeparators]
+    )
 
     private let source: NSString
 
@@ -175,6 +185,7 @@ private struct MarkdownDocumentParser {
         let codeRanges = codeBlocks.map(\.sourceRange)
         let tables = MarkdownTable.tables(in: text, excluding: codeRanges)
         let footnotes = MarkdownFootnotePresentation.parse(in: text, excluding: codeRanges)
+        let details = MarkdownDetailsBlock.blocks(in: text, excluding: codeRanges)
 
         // Claimed blocks, keyed by where they start.
         var claims: [Int: (block: MarkdownBlock, end: Int)] = [:]
@@ -183,6 +194,25 @@ private struct MarkdownDocumentParser {
         }
         for table in tables {
             claims[table.sourceRange.location] = (.table(tableContent(table)), NSMaxRange(table.sourceRange))
+        }
+        for detail in details where claims[detail.sourceRange.location] == nil {
+            let start = detail.sourceRange.location
+            guard start == 0 || source.character(at: start - 1) == unichar(10) else { continue }
+            let summary = source.substring(with: detail.summaryContentRange)
+            let body = source.substring(with: detail.bodyRange)
+                .trimmingCharacters(in: .newlines)
+            claims[start] = (
+                .details(summary: summary, body: MarkdownDocument(parsing: body), isExpanded: detail.isExpanded),
+                claimEnd(after: detail.sourceRange)
+            )
+        }
+        let protectedRanges = codeRanges + tables.map(\.sourceRange) + details.map(\.sourceRange)
+        for match in Self.mathPattern.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+            guard !protectedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }),
+                  claims[match.range.location] == nil else { continue }
+            let expression = source.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            claims[match.range.location] = (.math(expression), claimEnd(after: match.range))
         }
         var footnoteOrdinals: [String: Int] = [:]
         for definition in footnotes.definitions {
@@ -262,6 +292,11 @@ private struct MarkdownDocumentParser {
         }
         flushParagraph()
         return MarkdownDocument(blocks: blocks, footnoteOrdinals: footnoteOrdinals)
+    }
+
+    private func claimEnd(after range: NSRange) -> Int {
+        let end = NSMaxRange(range)
+        return end < source.length && source.character(at: end) == unichar(10) ? end + 1 : end
     }
 
     private func codeBlock(_ block: MarkdownCodeBlock) -> MarkdownBlock {

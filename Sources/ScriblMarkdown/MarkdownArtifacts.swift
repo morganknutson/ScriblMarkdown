@@ -29,6 +29,9 @@ public struct MarkdownArtifact: Equatable, Identifiable, Sendable {
 }
 
 public struct MarkdownArtifactParser: Sendable {
+    private static let noteExpression = try! NSRegularExpression(
+        pattern: #"^\[([^\]\n]+)\]\((<?)([^)\n]+?)(>?)\)$"#
+    )
     /// Lowercased path extensions of files a relative link can embed as a document card.
     public let linkableDocumentExtensions: Set<String>
 
@@ -105,9 +108,7 @@ public struct MarkdownArtifactParser: Sendable {
         noteURL: URL?,
         libraryURLs: [URL]
     ) -> MarkdownArtifactKind? {
-        let expression = try! NSRegularExpression(
-            pattern: #"^\[([^\]\n]+)\]\((<?)([^)\n]+?)(>?)\)$"#
-        )
+        let expression = Self.noteExpression
         let fullRange = NSRange(location: 0, length: (line as NSString).length)
         guard let match = expression.firstMatch(in: line, range: fullRange),
               match.range == fullRange else { return nil }

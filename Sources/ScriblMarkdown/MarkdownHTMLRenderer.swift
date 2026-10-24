@@ -78,6 +78,12 @@ public struct MarkdownHTMLRenderer {
                 html += "<hr>\n"
             case .footnote(_, let ordinal, let text):
                 footnotes.append((ordinal, text))
+            case .details(let summary, let body, let isExpanded):
+                html += "<details\(isExpanded ? " open" : "")><summary>\(inline(summary, document))</summary>\n"
+                html += self.html(for: body)
+                html += "</details>\n"
+            case .math(let source):
+                html += "<div class=\"math\">\(escape(source))</div>\n"
             }
         }
         closeLists(toDepth: 0)

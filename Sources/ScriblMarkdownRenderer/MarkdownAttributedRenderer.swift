@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import ScriblMarkdown
 
@@ -26,10 +27,11 @@ public struct MarkdownAttributedRenderer {
 
     /// The document as text segments, with code blocks, tables and images split out so
     /// the host can show each with its own view.
-    public func segments(for document: MarkdownDocument) -> [MarkdownRenderedSegment] {
-        document.sections.map { section in
+    public func segments(for document: MarkdownDocument, cache: MarkdownRenderCache? = nil) -> [MarkdownRenderedSegment] {
+        document.sections.enumerated().map { sectionIndex, section in
             switch section {
-            case .text(let text): return .text(attributedString(for: text))
+            case .text(let text):
+                return .text(render(text, imageAttachment: nil, cache: cache, scope: sectionIndex + 1))
             case .codeBlock(let code, let language): return .codeBlock(code: code, language: language)
             case .table(let table): return .table(table)
             case .image(let source, let alternateText): return .image(source: source, alternateText: alternateText)
@@ -42,7 +44,17 @@ public struct MarkdownAttributedRenderer {
     /// images whatever `imageAttachment` returns (their alternate text when nil).
     public func attributedString(
         for document: MarkdownDocument,
-        imageAttachment: ((_ source: String, _ alternateText: String) -> NSTextAttachment?)? = nil
+        imageAttachment: ((_ source: String, _ alternateText: String) -> NSTextAttachment?)? = nil,
+        cache: MarkdownRenderCache? = nil
+    ) -> NSAttributedString {
+        render(document, imageAttachment: imageAttachment, cache: cache, scope: 0)
+    }
+
+    private func render(
+        _ document: MarkdownDocument,
+        imageAttachment: ((_ source: String, _ alternateText: String) -> NSTextAttachment?)?,
+        cache: MarkdownRenderCache?,
+        scope: Int
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
         var previous: MarkdownBlock?
@@ -54,6 +66,22 @@ public struct MarkdownAttributedRenderer {
                 let image = NSMutableAttributedString(attachment: attachment)
                 image.addAttribute(.paragraphStyle, value: paragraphStyle(spacingAfter: style.blockSpacing), range: NSRange(location: 0, length: image.length))
                 result.append(image)
+            } else if imageAttachment == nil, let cache {
+                appendSeparator(after: previous, to: result)
+                if let cached = cache.value(
+                    at: index, scope: scope, block: block, previous: previous, next: next,
+                    footnoteOrdinals: document.footnoteOrdinals
+                ) {
+                    result.append(cached)
+                } else {
+                    let rendered = NSMutableAttributedString()
+                    append(block, previous: previous, next: next, document: document, to: rendered)
+                    cache.store(
+                        rendered, at: index, scope: scope, block: block, previous: previous, next: next,
+                        footnoteOrdinals: document.footnoteOrdinals
+                    )
+                    result.append(rendered)
+                }
             } else {
                 append(block, previous: previous, next: next, document: document, to: result)
             }
@@ -162,10 +190,45 @@ public struct MarkdownAttributedRenderer {
                 attributes: baseAttributes(font: style.bodyFont, color: style.mutedColor)
             )
             content.append(inline(text, attributes: baseAttributes(font: style.bodyFont, color: style.textColor), footnoteOrdinals: ordinals))
+
+        case .details(let summary, let body, _):
+            paragraph = paragraphStyle(spacingAfter: spacingAfter)
+            let summaryFont = NSFontManager.shared.convert(style.bodyFont, toHaveTrait: .boldFontMask)
+            content = inline(summary, attributes: baseAttributes(font: summaryFont, color: style.textColor), footnoteOrdinals: ordinals)
+            let summaryParagraph = paragraphStyle(spacingAfter: style.itemSpacing)
+            applyParagraphStyle(summaryParagraph, to: content)
+            let bodyText = NSMutableAttributedString(attributedString: attributedString(for: body))
+            if bodyText.length > 0 {
+                content.append(NSAttributedString(string: "\n", attributes: baseAttributes(font: summaryFont, color: style.textColor)))
+                var bodyParagraphs: [(NSRange, NSParagraphStyle?)] = []
+                bodyText.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: bodyText.length)) { value, range, _ in
+                    bodyParagraphs.append((range, value as? NSParagraphStyle))
+                }
+                for (range, value) in bodyParagraphs {
+                    let indented = (value?.mutableCopy() as? NSMutableParagraphStyle)
+                        ?? paragraphStyle(spacingAfter: spacingAfter)
+                    indented.headIndent += style.listIndent
+                    indented.firstLineHeadIndent += style.listIndent
+                    bodyText.addAttribute(.paragraphStyle, value: indented, range: range)
+                }
+                content.append(bodyText)
+            }
+
+        case .math(let expression):
+            paragraph = paragraphStyle(spacingAfter: spacingAfter)
+            paragraph.alignment = .center
+            content = NSMutableAttributedString(
+                string: MarkdownMathDisplay.text(for: expression),
+                attributes: baseAttributes(font: style.bodyFont, color: style.textColor)
+            )
         }
 
-        applyParagraphStyle(paragraph, to: content)
-        result.append(content)
+        if case .details = block {
+            result.append(content)
+        } else {
+            applyParagraphStyle(paragraph, to: content)
+            result.append(content)
+        }
     }
 
     /// Ends the previous block's last paragraph. The newline keeps that paragraph's
@@ -349,3 +412,4 @@ public struct MarkdownAttributedRenderer {
         return attributes
     }
 }
+#endif

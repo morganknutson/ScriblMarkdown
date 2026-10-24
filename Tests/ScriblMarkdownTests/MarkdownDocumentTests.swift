@@ -84,6 +84,48 @@ final class MarkdownDocumentTests: XCTestCase {
         XCTAssertEqual(runs.first { $0.footnoteOrdinal == 3 }?.text, "3")
     }
 
+    func testDetailsAndMathParseIntoTextSectionsAndPlainText() {
+        let document = MarkdownDocument(parsing: """
+        <details open><summary>**More** info</summary>
+        Body with [link](https://example.com).
+        - Item
+        </details>
+
+        $$
+        x^2 + \\pm
+        $$
+        """)
+        XCTAssertEqual(document.blocks.count, 2, String(describing: document.blocks))
+        guard case .details(let summary, let body, let expanded) = document.blocks[0] else {
+            return XCTFail("Expected details block")
+        }
+        XCTAssertEqual(summary, "**More** info")
+        XCTAssertTrue(expanded)
+        XCTAssertEqual(body.plainText(), "Body with link.\nItem")
+        XCTAssertEqual(document.sections.count, 1)
+        XCTAssertEqual(document.plainText(), "More info\nBody with link.\nItem\nx² + ±")
+        XCTAssertEqual(document.blocks[1], .math("x^2 + \\pm"))
+    }
+
+    func testUnsupportedSetextHeadingAndSingleColumnTableStayText() {
+        let document = MarkdownDocument(parsing: "Title\n=====\n\n| A |\n|---|")
+        XCTAssertEqual(document.blocks, [.paragraph("Title\n====="), .paragraph("| A |\n|---|")])
+    }
+
+    func testAutolinksExcludeCodeAndExplicitLinksAndTrimPunctuation() {
+        let text = "See <https://a.dev/x> and https://b.dev/a_(b)., `https://code.dev` [label](https://dest.dev)"
+        let runs = MarkdownInlineParser.runs(in: text)
+        XCTAssertEqual(runs.map(\.text).joined(), "See https://a.dev/x and https://b.dev/a_(b)., https://code.dev label")
+        XCTAssertEqual(runs.first(where: { $0.text == "https://a.dev/x" })?.link, "https://a.dev/x")
+        XCTAssertEqual(runs.first(where: { $0.text == "https://b.dev/a_(b)" })?.link, "https://b.dev/a_(b)")
+        XCTAssertNil(runs.first(where: { $0.text == "https://code.dev" })?.link)
+        XCTAssertEqual(runs.first(where: { $0.text == "label" })?.link, "https://dest.dev")
+        XCTAssertEqual(
+            MarkdownDocument(parsing: "Read <https://a.dev/x> and https://b.dev/a_(b).").plainText(),
+            "Read https://a.dev/x and https://b.dev/a_(b)."
+        )
+    }
+
     func testPlainTextDropsMarkupAndCode() {
         let document = MarkdownDocument(parsing: "## Plan\n\nRun `make` then **ship** via [CI](https://ci).\n\n```\nmake\n```\n- [ ] Test\n")
         XCTAssertEqual(document.plainText(), "Plan\nRun  then ship via CI.\nTest")
@@ -91,6 +133,23 @@ final class MarkdownDocumentTests: XCTestCase {
 }
 
 final class MarkdownHTMLRendererTests: XCTestCase {
+    func testRendersDetailsMathAndAutolinks() {
+        let document = MarkdownDocument(parsing: """
+        <details open><summary>**More** info</summary>
+        Go to https://a.dev/x.
+        </details>
+
+        $$
+        x^2 & y
+        $$
+        """)
+        let html = MarkdownHTMLRenderer().html(for: document)
+        XCTAssertTrue(html.contains("<details open><summary><strong>More</strong> info</summary>"))
+        XCTAssertTrue(html.contains("<p>Go to <a href=\"https://a.dev/x\">https://a.dev/x</a>.</p>"))
+        XCTAssertTrue(html.contains("<div class=\"math\">x^2 &amp; y</div>"))
+        XCTAssertTrue(html.contains("</details>"))
+    }
+
     func testRendersBlocksListsAndInlineStyles() {
         let html = MarkdownHTMLRenderer().html(for: MarkdownDocument(parsing: """
         ## Changes
