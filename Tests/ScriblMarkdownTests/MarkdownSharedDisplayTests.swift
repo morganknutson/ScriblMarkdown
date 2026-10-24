@@ -10,13 +10,26 @@ final class MarkdownSharedDisplayTests: XCTestCase {
                 case .text: "text"
                 case .linkCard(.web): "web"
                 case .linkCard(.note(let note)): "note:\(note.title)"
-                case .codeBlock, .table, .image: "block"
+                case .codeBlock, .table, .image, .details: "block"
                 }
             }
         }
         XCTAssertEqual(kinds(.none), ["text"])
         XCTAssertEqual(kinds(.documents), ["text", "note:Plan", "text"])
         XCTAssertEqual(kinds(.all), ["text", "web", "note:Plan", "text"])
+    }
+
+    func testDetailsRemainASeparateDisplaySection() {
+        let document = MarkdownDocument(parsing: "Before\n\n<details><summary>More</summary>\nBody\n</details>\n\nAfter")
+        let sections = document.sections
+
+        XCTAssertEqual(sections.count, 3)
+        guard case .details(let summary, let body, let expanded) = sections[1] else {
+            return XCTFail("The details body must remain available to a disclosure view")
+        }
+        XCTAssertEqual(summary, "More")
+        XCTAssertEqual(body.plainText(), "Body")
+        XCTAssertFalse(expanded)
     }
 
     func testInlineKeycapsMathAndHTMLTagsDisplayAsTheEditorShowsThem() {

@@ -84,7 +84,7 @@ final class MarkdownDocumentTests: XCTestCase {
         XCTAssertEqual(runs.first { $0.footnoteOrdinal == 3 }?.text, "3")
     }
 
-    func testDetailsAndMathParseIntoTextSectionsAndPlainText() {
+    func testDetailsAndMathParseIntoSeparateSectionsAndPlainText() {
         let document = MarkdownDocument(parsing: """
         <details open><summary>**More** info</summary>
         Body with [link](https://example.com).
@@ -102,7 +102,10 @@ final class MarkdownDocumentTests: XCTestCase {
         XCTAssertEqual(summary, "**More** info")
         XCTAssertTrue(expanded)
         XCTAssertEqual(body.plainText(), "Body with link.\nItem")
-        XCTAssertEqual(document.sections.count, 1)
+        XCTAssertEqual(document.sections.count, 2)
+        guard case .details = document.sections[0] else {
+            return XCTFail("Expected a separate details section for a disclosure view")
+        }
         XCTAssertEqual(document.plainText(), "More info\nBody with link.\nItem\nx² + ±")
         XCTAssertEqual(document.blocks[1], .math("x^2 + \\pm"))
     }

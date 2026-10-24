@@ -92,6 +92,8 @@ public enum MarkdownDocumentSection: Equatable, Sendable {
     case image(source: String, alternateText: String)
     /// A paragraph that is only a web address or a document link, shown as a card.
     case linkCard(MarkdownArtifactKind)
+    /// A native disclosure block; display hosts can keep its body collapsed.
+    case details(summary: String, body: MarkdownDocument, isExpanded: Bool)
 }
 
 /// Which lone links display as cards.
@@ -166,6 +168,9 @@ public struct MarkdownDocument: Equatable, Sendable {
             case .image(let source, let alternateText):
                 flushText()
                 sections.append(.image(source: source, alternateText: alternateText))
+            case .details(let summary, let body, let isExpanded):
+                flushText()
+                sections.append(.details(summary: summary, body: body, isExpanded: isExpanded))
             case .paragraph(let paragraph):
                 if let kind = card(for: paragraph.trimmingCharacters(in: .whitespaces)) {
                     flushText()

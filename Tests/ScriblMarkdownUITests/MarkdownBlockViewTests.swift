@@ -50,5 +50,24 @@ final class MarkdownBlockViewTests: XCTestCase {
         XCTAssertEqual(MarkdownImageBlockView.imageURL(from: "https://x.dev/a.png")?.host, "x.dev")
         XCTAssertNil(MarkdownImageBlockView.imageURL(from: "rel.png"))
     }
+
+    func testDetailsCanExpandWithoutLosingTheirBody() {
+        let body = NSTextField(labelWithString: "Hidden text")
+        let view = MarkdownDetailsView(
+            summary: NSAttributedString(string: "More"),
+            body: body,
+            theme: MarkdownTheme(),
+            isExpanded: false
+        )
+        view.frame = NSRect(x: 0, y: 0, width: 320, height: 100)
+        view.layoutSubtreeIfNeeded()
+        let collapsed = view.fittingSize.height
+
+        view.isExpanded = true
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThan(view.fittingSize.height, collapsed)
+        XCTAssertTrue(view.subviews.contains { $0.subviews.contains(body) })
+    }
 }
 #endif

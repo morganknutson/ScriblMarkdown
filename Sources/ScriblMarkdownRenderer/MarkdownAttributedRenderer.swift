@@ -13,6 +13,7 @@ public enum MarkdownRenderedSegment {
     /// A paragraph that is only a web address or a document link, for the host to show as
     /// a `MarkdownLinkCardView`.
     case linkCard(MarkdownArtifactKind)
+    case details(summary: String, body: MarkdownDocument, isExpanded: Bool)
 }
 
 /// Renders a `MarkdownDocument` for display: markers removed, styled with a
@@ -54,6 +55,8 @@ public struct MarkdownAttributedRenderer {
             case .table(let table): return .table(table)
             case .image(let source, let alternateText): return .image(source: source, alternateText: alternateText)
             case .linkCard(let kind): return .linkCard(kind)
+            case .details(let summary, let body, let isExpanded):
+                return .details(summary: summary, body: body, isExpanded: isExpanded)
             }
         }
     }
