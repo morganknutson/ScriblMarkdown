@@ -694,92 +694,33 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         excluding excludedRanges: [NSRange]
     ) -> [NSRange] {
         var markerRanges: [NSRange] = []
-
-        func styledMatches(
-            pattern: String,
-            traits: [NSFontTraitMask] = [],
-            attributes: [NSAttributedString.Key: Any] = [:]
-        ) {
-            let regex = try! NSRegularExpression(pattern: pattern)
-            let matches = regex.matches(
-                in: storage.string,
-                range: NSRange(location: 0, length: storage.length)
-            )
-            for match in matches where !intersects(match.range, excludedRanges) {
-                let contentRange = match.range(at: 1)
-                if !traits.isEmpty {
-                    addFontTraits(traits, to: contentRange, in: storage)
-                }
-                if !attributes.isEmpty {
-                    storage.addAttributes(attributes, range: contentRange)
-                }
-                let opening = NSRange(
-                    location: match.range.location,
-                    length: contentRange.location - match.range.location
-                )
-                let closing = NSRange(
-                    location: NSMaxRange(contentRange),
-                    length: NSMaxRange(match.range) - NSMaxRange(contentRange)
-                )
-                hideMarker(in: storage, range: opening)
-                hideMarker(in: storage, range: closing)
-                markerRanges.append(contentsOf: [opening, closing])
+        let spans = MarkdownInlineSyntax.emphasisSpans(in: storage.string, excluding: excludedRanges)
+        for span in spans {
+            switch span.style {
+            case .strongEmphasis:
+                addFontTraits([.boldFontMask, .italicFontMask], to: span.contentRange, in: storage)
+            case .strong:
+                addFontTraits([.boldFontMask], to: span.contentRange, in: storage)
+            case .emphasis:
+                addFontTraits([.italicFontMask], to: span.contentRange, in: storage)
+            case .strikethrough:
+                storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: span.contentRange)
+            case .highlight:
+                storage.addAttribute(.backgroundColor, value: palette.highlight.withAlphaComponent(0.24), range: span.contentRange)
+            case .subscript:
+                storage.addAttribute(.baselineOffset, value: scaled(-3), range: span.contentRange)
+            case .superscript:
+                storage.addAttribute(.baselineOffset, value: scaled(5), range: span.contentRange)
+            case .code:
+                continue
+            }
+            for marker in span.markerRanges {
+                hideMarker(in: storage, range: marker)
+                markerRanges.append(marker)
             }
         }
-
-        styledMatches(
-            pattern: #"(?<![\\*])\*\*\*(?!\*)(?=\S)(.+?)(?<=\S)(?<!\*)\*\*\*(?!\*)"#,
-            traits: [.boldFontMask, .italicFontMask]
-        )
-        styledMatches(
-            pattern: #"(?<![\\_\p{L}\p{N}])___(?!_)(?=\S)(.+?)(?<=\S)(?<!_)___(?![_\p{L}\p{N}])"#,
-            traits: [.boldFontMask, .italicFontMask]
-        )
-        styledMatches(
-            pattern: #"(?<![\\*])\*\*(?!\*)(?=\S)(.+?)(?<=\S)(?<!\*)\*\*(?!\*)"#,
-            traits: [.boldFontMask]
-        )
-        styledMatches(
-            pattern: #"(?<![\\_\p{L}\p{N}])__(?!_)(?=\S)(.+?)(?<=\S)(?<!_)__(?![_\p{L}\p{N}])"#,
-            traits: [.boldFontMask]
-        )
-        styledMatches(
-            pattern: #"(?<![\\*])\*(?!\*)(?=\S)(.+?)(?<=\S)(?<!\*)\*(?!\*)"#,
-            traits: [.italicFontMask]
-        )
-        styledMatches(
-            pattern: #"(?<![\\_\p{L}\p{N}])_(?!_)(?=\S)(.+?)(?<=\S)(?<!_)_(?![_\p{L}\p{N}])"#,
-            traits: [.italicFontMask]
-        )
-        styledMatches(
-            pattern: #"(?<![\\~])~~(?!~)(?=\S)(.+?)(?<=\S)(?<!~)~~(?!~)"#,
-            attributes: [.strikethroughStyle: NSUnderlineStyle.single.rawValue]
-        )
-        styledMatches(
-            pattern: #"(?<![\\=])==(?!\=)(?=\S)(.+?)(?<=\S)(?<!\=)==(?!\=)"#,
-            attributes: [.backgroundColor: palette.highlight.withAlphaComponent(0.24)]
-        )
-        styledMatches(
-            pattern: #"(?<![\\~])~(?!~)([^~\s\r\n]+)(?<!~)~(?!~)"#,
-            attributes: [.baselineOffset: scaled(-3)]
-        )
-        styledMatches(
-            pattern: #"(?<![\\^])\^([^\^\s\[\]\r\n]+)\^(?!\^)"#,
-            attributes: [.baselineOffset: scaled(5)]
-        )
-
-        let smallTextPatterns = [
-            #"(?<![\\~])~(?!~)([^~\s\r\n]+)(?<!~)~(?!~)"#,
-            #"(?<![\\^])\^([^\^\s\[\]\r\n]+)\^(?!\^)"#
-        ]
-        for pattern in smallTextPatterns {
-            let regex = try! NSRegularExpression(pattern: pattern)
-            for match in regex.matches(
-                in: storage.string,
-                range: NSRange(location: 0, length: storage.length)
-            ) where !intersects(match.range, excludedRanges) {
-                resizeFonts(in: match.range(at: 1), to: scaled(13), storage: storage)
-            }
+        for span in spans where span.style == .subscript || span.style == .superscript {
+            resizeFonts(in: span.contentRange, to: scaled(13), storage: storage)
         }
         return markerRanges
     }
@@ -821,19 +762,15 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         in storage: NSTextStorage,
         excluding excludedRanges: [NSRange]
     ) -> [NSRange] {
-        let regex = try! NSRegularExpression(pattern: #"`([^`\n]+)`"#)
-        let range = NSRange(location: 0, length: storage.length)
-        let matches = regex.matches(in: storage.string, range: range)
-            .filter { !intersects($0.range, excludedRanges) }
-        for match in matches {
+        let spans = MarkdownInlineSyntax.codeSpans(in: storage.string, excluding: excludedRanges)
+        for span in spans {
             storage.addAttributes([
                 .font: typeface.monospacedFont(ofSize: scaled(15), weight: .regular),
                 .backgroundColor: palette.quaternaryText.withAlphaComponent(0.35)
-            ], range: match.range(at: 1))
-            hideMarker(in: storage, range: NSRange(location: match.range.location, length: 1))
-            hideMarker(in: storage, range: NSRange(location: NSMaxRange(match.range) - 1, length: 1))
+            ], range: span.contentRange)
+            span.markerRanges.forEach { hideMarker(in: storage, range: $0) }
         }
-        return matches.map(\.range)
+        return spans.map(\.range)
     }
 
     private func styleEscapesAndEntities(
@@ -846,51 +783,39 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             inlineReplacementGlyphLayouts = []
             return
         }
-        let fullRange = NSRange(location: 0, length: storage.length)
-        let escapeExpression = try! NSRegularExpression(
-            pattern: #"\\([\\`*{}\[\]()#+\-.!_|>~^=&])"#
-        )
-        let escapeMatches = escapeExpression.matches(in: storage.string, range: fullRange)
-            .filter { !intersects($0.range, excludedRanges) }
         var markerRanges = existingMarkerRanges
-        for match in escapeMatches {
-            let slash = NSRange(location: match.range.location, length: 1)
-            hideMarker(in: storage, range: slash)
-            markerRanges.append(slash)
-        }
-
-        let entityExpression = try! NSRegularExpression(
-            pattern: #"&(?:[A-Za-z][A-Za-z0-9]+|#[0-9]+|#[xX][0-9A-Fa-f]+);"#
-        )
         var rendered: [MarkdownEditorTextView.RenderedInlineReplacement] = []
         var glyphLayouts: [RenderedObjectGlyphLayout] = []
-        let source = storage.string as NSString
-        for match in entityExpression.matches(in: storage.string, range: fullRange)
-        where !intersects(match.range, excludedRanges) {
-            let entity = source.substring(with: match.range)
-            guard let displayText = MarkdownEntityDecoder.value(for: entity) else { continue }
-            let font = storage.attribute(
-                .font,
-                at: match.range.location,
-                effectiveRange: nil
-            ) as? NSFont ?? typeface.font(ofSize: scaled(17))
-            let size = (displayText as NSString).size(withAttributes: [.font: font])
-            hideMarker(in: storage, range: match.range)
-            storage.addAttribute(
-                .font,
-                value: font,
-                range: NSRange(location: match.range.location, length: 1)
-            )
-            let measured = NSSize(width: ceil(size.width), height: ceil(size.height))
-            rendered.append(.init(
-                sourceRange: match.range,
-                displayText: displayText,
-                font: font,
-                size: measured,
-                baselineOffset: 0,
-                color: palette.text
-            ))
-            glyphLayouts.append(.init(range: match.range, size: measured))
+        for replacement in MarkdownInlineSyntax.replacements(in: storage.string, excluding: excludedRanges) {
+            switch replacement.kind {
+            case .escape:
+                let slash = NSRange(location: replacement.range.location, length: 1)
+                hideMarker(in: storage, range: slash)
+                markerRanges.append(slash)
+            case .entity:
+                let font = storage.attribute(
+                    .font,
+                    at: replacement.range.location,
+                    effectiveRange: nil
+                ) as? NSFont ?? typeface.font(ofSize: scaled(17))
+                let size = (replacement.replacement as NSString).size(withAttributes: [.font: font])
+                hideMarker(in: storage, range: replacement.range)
+                storage.addAttribute(
+                    .font,
+                    value: font,
+                    range: NSRange(location: replacement.range.location, length: 1)
+                )
+                let measured = NSSize(width: ceil(size.width), height: ceil(size.height))
+                rendered.append(.init(
+                    sourceRange: replacement.range,
+                    displayText: replacement.replacement,
+                    font: font,
+                    size: measured,
+                    baselineOffset: 0,
+                    color: palette.text
+                ))
+                glyphLayouts.append(.init(range: replacement.range, size: measured))
+            }
         }
         inlineReplacementGlyphLayouts = glyphLayouts
         markdownTextView.renderedInlineReplacements = rendered
@@ -1402,30 +1327,24 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         textView: NSTextView
     ) {
         guard let markdownTextView = textView as? MarkdownEditorTextView else { return }
-        let expression = try! NSRegularExpression(
-            pattern: #"(?m)^[ \t]{0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"#
-        )
-        let matches = expression.matches(
-            in: storage.string,
-            range: NSRange(location: 0, length: storage.length)
-        ).filter { !intersects($0.range, excludedRanges) }
-        for match in matches {
-            hideMarker(in: storage, range: match.range)
+        let ruleRanges = MarkdownInlineSyntax.thematicBreakRanges(in: storage.string, excluding: excludedRanges)
+        for range in ruleRanges {
+            hideMarker(in: storage, range: range)
             storage.addAttribute(
                 .font,
                 value: font,
-                range: NSRange(location: match.range.location, length: 1)
+                range: NSRange(location: range.location, length: 1)
             )
             let paragraph = (
-                storage.attribute(.paragraphStyle, at: match.range.location, effectiveRange: nil)
+                storage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil)
                     as? NSParagraphStyle
             )?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
             paragraph.minimumLineHeight = max(18, font.pointSize)
             paragraph.maximumLineHeight = max(18, font.pointSize)
             paragraph.paragraphSpacing = 7
-            storage.addAttribute(.paragraphStyle, value: paragraph, range: match.range)
+            storage.addAttribute(.paragraphStyle, value: paragraph, range: range)
         }
-        markdownTextView.renderedHorizontalRules = matches.map { .init(sourceRange: $0.range) }
+        markdownTextView.renderedHorizontalRules = ruleRanges.map { .init(sourceRange: $0) }
     }
 
     private func styleFootnotes(
