@@ -72,6 +72,11 @@ public final class MarkdownEditorView: NSScrollView {
 
     required init?(coder: NSCoder) { nil }
 
+    /// The formatting at the caret.
+    public var formatting: MarkdownEditorFormatting {
+        controller.formatting(in: markdownTextView)
+    }
+
     public func perform(_ action: MarkdownEditorCommand.Action) {
         controller.apply(action, to: markdownTextView)
     }

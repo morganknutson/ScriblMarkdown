@@ -24,5 +24,10 @@ editor.perform(.bold)
 ```
 
 `MarkdownEditorHost` connects the editor to its app: which documents links can embed as
-cards, how they open, web link previews (`WebLinkMetadataProviding`) and diagnostics. Every
-requirement has a default.
+cards, how they open, web link previews (`WebLinkMetadataProviding`), code block syntax
+colors (`MarkdownCodeHighlighting`) and diagnostics. Every requirement has a default.
+
+`editor.formatting` reports the formatting at the caret (heading level, bold, quote, code)
+for toolbars; `onSelectionChange` says when to read it. `MarkdownInsertion` holds the
+source edits behind commands like `.link` and `.horizontalRule`, so other editor surfaces
+(Scribl's iOS editor) apply exactly the same Markdown.

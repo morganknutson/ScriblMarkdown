@@ -3,11 +3,18 @@ import Foundation
 import ScriblMarkdown
 import UniformTypeIdentifiers
 
-struct MarkdownDocumentDragPayload: Codable, Equatable, Sendable {
-    static let pasteboardType = NSPasteboard.PasteboardType("com.morgan.notes.note-artifact")
+/// A document dragged into the editor, such as a note from Scribl's sidebar, which
+/// inserts as a relative link card.
+public struct MarkdownDocumentDragPayload: Codable, Equatable, Sendable {
+    public static let pasteboardType = NSPasteboard.PasteboardType("com.morgan.notes.note-artifact")
 
-    let fileURL: URL
-    let title: String
+    public let fileURL: URL
+    public let title: String
+
+    public init(fileURL: URL, title: String) {
+        self.fileURL = fileURL
+        self.title = title
+    }
 
     var encodedData: Data? { try? JSONEncoder().encode(self) }
 
@@ -16,7 +23,7 @@ struct MarkdownDocumentDragPayload: Codable, Equatable, Sendable {
     }
 
     /// Reads a dragged document, accepting plain file URLs whose extension is in `linkableExtensions`.
-    static func read(from pasteboard: NSPasteboard, linkableExtensions: Set<String>) -> Self? {
+    public static func read(from pasteboard: NSPasteboard, linkableExtensions: Set<String>) -> Self? {
         if let data = pasteboard.data(forType: pasteboardType),
            let payload = decode(data) {
             return payload
@@ -33,7 +40,7 @@ struct MarkdownDocumentDragPayload: Codable, Equatable, Sendable {
         )
     }
 
-    func itemProvider() -> NSItemProvider {
+    public func itemProvider() -> NSItemProvider {
         let provider = NSItemProvider()
         if let data = encodedData {
             provider.registerDataRepresentation(

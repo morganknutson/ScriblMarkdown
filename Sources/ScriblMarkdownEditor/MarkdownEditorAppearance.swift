@@ -53,14 +53,20 @@ public struct MarkdownEditorPalette: Equatable {
     )
 }
 
-/// Supplies the proportional fonts styled Markdown is set in.
+/// Supplies the fonts styled Markdown is set in: proportional for prose, monospaced for
+/// code and source presentation.
 public protocol MarkdownEditorTypeface {
     func font(ofSize size: CGFloat, trait: NSFontTraitMask?) -> NSFont
+    func monospacedFont(ofSize size: CGFloat, weight: NSFont.Weight) -> NSFont
 }
 
 public extension MarkdownEditorTypeface {
     func font(ofSize size: CGFloat) -> NSFont {
         font(ofSize: size, trait: nil)
+    }
+
+    func monospacedFont(ofSize size: CGFloat, weight: NSFont.Weight) -> NSFont {
+        NSFont.monospacedSystemFont(ofSize: size, weight: weight)
     }
 }
 
@@ -100,5 +106,32 @@ public struct MarkdownEditorStyle {
     /// Scales a size designed against `referenceBodyFontSize` to the configured body size.
     public func scaled(_ referenceSize: CGFloat) -> CGFloat {
         referenceSize * bodyFontSize / Self.referenceBodyFontSize
+    }
+}
+
+/// The formatting at the editor's caret, for reflecting in a toolbar.
+public struct MarkdownEditorFormatting: Equatable {
+    /// 1 for `#` through 6 for `######`; nil for body text.
+    public let headingLevel: Int?
+    public let isBold: Bool
+    public let isItalic: Bool
+    public let isInlineCode: Bool
+    public let isQuote: Bool
+    public let isCodeBlock: Bool
+
+    public init(
+        headingLevel: Int?,
+        isBold: Bool,
+        isItalic: Bool,
+        isInlineCode: Bool,
+        isQuote: Bool,
+        isCodeBlock: Bool
+    ) {
+        self.headingLevel = headingLevel
+        self.isBold = isBold
+        self.isItalic = isItalic
+        self.isInlineCode = isInlineCode
+        self.isQuote = isQuote
+        self.isCodeBlock = isCodeBlock
     }
 }

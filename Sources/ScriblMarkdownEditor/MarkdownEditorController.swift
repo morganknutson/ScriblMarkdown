@@ -13,6 +13,8 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
 
     /// Called with the new source after every user edit.
     public var onTextChange: ((String) -> Void)?
+    /// Called after the selection moves, such as to refresh a toolbar from `formatting(in:)`.
+    public var onSelectionChange: (() -> Void)?
     /// The document's file, which relative image and note links resolve against.
     public var documentURL: URL?
     public var presentation: Presentation
@@ -168,6 +170,41 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             (textView as? MarkdownEditorTextView)?.normalizeRenderedObjectSelection()
         }
         protectTitlePrefixSelection(in: textView)
+        onSelectionChange?()
+    }
+
+    /// The formatting at the caret, read from the source line and the styled text.
+    func formatting(in textView: NSTextView) -> MarkdownEditorFormatting {
+        let source = textView.string as NSString
+        let selection = textView.selectedRange()
+        let location = min(selection.location, source.length)
+        let lineRange = source.lineRange(for: NSRange(location: location, length: 0))
+        let line = source.substring(with: lineRange)
+        let headingMarker = line.prefix { $0 == "#" }.count
+        let headingLevel = (1...6).contains(headingMarker)
+            && line.dropFirst(headingMarker).first.map { $0 == " " || $0 == "\t" } == true
+            ? headingMarker
+            : nil
+        let isQuote = line.drop { $0 == " " || $0 == "\t" }.first == ">"
+        let isCodeBlock = (textView as? MarkdownEditorTextView)?.renderedCodeBlocks.contains {
+            NSLocationInRange(location, $0.contentRange)
+        } == true
+
+        // Inline styles come from the character the next keystroke would extend.
+        let probe = selection.length > 0 ? location : location - 1
+        var font: NSFont?
+        if presentation == .styled, probe >= 0, probe < source.length {
+            font = textView.textStorage?.attribute(.font, at: probe, effectiveRange: nil) as? NSFont
+        }
+        let traits = font?.fontDescriptor.symbolicTraits ?? []
+        return MarkdownEditorFormatting(
+            headingLevel: headingLevel,
+            isBold: headingLevel == nil && traits.contains(.bold),
+            isItalic: traits.contains(.italic),
+            isInlineCode: !isCodeBlock && traits.contains(.monoSpace),
+            isQuote: isQuote,
+            isCodeBlock: isCodeBlock
+        )
     }
 
     public func textView(
@@ -316,7 +353,25 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             applyChecklistStyle(to: textView)
         case .codeBlock:
             applyCodeBlock(to: textView)
+        case .link(let title, let destination):
+            apply(MarkdownInsertion.link(
+                title: title,
+                destination: destination,
+                in: textView.string,
+                selection: textView.selectedRange()
+            ), to: textView)
+        case .horizontalRule:
+            apply(MarkdownInsertion.horizontalRule(
+                in: textView.string,
+                selection: textView.selectedRange()
+            ), to: textView)
         }
+    }
+
+    /// Applies a shared source edit through the text view so it is undoable and restyled.
+    private func apply(_ edit: MarkdownEdit, to textView: NSTextView) {
+        textView.insertText(edit.replacement, replacementRange: edit.range)
+        textView.setSelectedRange(edit.selection)
     }
 
     func applyPresentation(to textView: NSTextView) {
@@ -337,7 +392,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         paragraph.paragraphSpacing = presentation == .styled ? 7 : 0
         let bodyFont = presentation == .styled
             ? typeface.font(ofSize: scaled(17))
-            : NSFont.monospacedSystemFont(ofSize: scaled(15), weight: .regular)
+            : typeface.monospacedFont(ofSize: scaled(15), weight: .regular)
 
         storage.beginEditing()
         storage.setAttributes([
@@ -772,7 +827,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             .filter { !intersects($0.range, excludedRanges) }
         for match in matches {
             storage.addAttributes([
-                .font: NSFont.monospacedSystemFont(ofSize: scaled(15), weight: .regular),
+                .font: typeface.monospacedFont(ofSize: scaled(15), weight: .regular),
                 .backgroundColor: palette.quaternaryText.withAlphaComponent(0.35)
             ], range: match.range(at: 1))
             hideMarker(in: storage, range: NSRange(location: match.range.location, length: 1))
@@ -1202,7 +1257,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
     ) {
         guard let markdownTextView = textView as? MarkdownEditorTextView else { return }
         let source = storage.string as NSString
-        let font = NSFont.monospacedSystemFont(ofSize: scaled(15), weight: .regular)
+        let font = typeface.monospacedFont(ofSize: scaled(15), weight: .regular)
         for block in blocks {
             if let openingRange = block.openingRange {
                 collapseLine(in: storage, range: openingRange)
@@ -1215,6 +1270,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             }
             guard block.contentRange.length > 0 else { continue }
             storage.addAttribute(.font, value: font, range: block.contentRange)
+            highlightCode(in: block, storage: storage)
             var location = block.contentRange.location
             while location < NSMaxRange(block.contentRange), location < source.length {
                 let lineRange = NSIntersectionRange(
@@ -1238,6 +1294,23 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         markdownTextView.renderedCodeBlocks = blocks.compactMap { block in
             guard block.contentRange.length > 0 else { return nil }
             return .init(sourceRange: block.sourceRange, contentRange: block.contentRange)
+        }
+    }
+
+    private func highlightCode(in block: MarkdownCodeBlock, storage: NSTextStorage) {
+        guard let highlighter = host?.codeHighlighter else { return }
+        let source = storage.string as NSString
+        let language = block.openingRange.flatMap { range -> String? in
+            let info = source.substring(with: range)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "`~").union(.whitespacesAndNewlines))
+            return info.split(whereSeparator: \.isWhitespace).first.map(String.init)
+        }
+        let code = source.substring(with: block.contentRange)
+        for run in highlighter.colorRuns(forCode: code, language: language) {
+            let range = NSRange(location: block.contentRange.location + run.range.location, length: run.range.length)
+            guard NSMaxRange(range) <= NSMaxRange(block.contentRange),
+                  !intersects(range, block.indentationRanges) else { continue }
+            storage.addAttribute(.foregroundColor, value: run.color, range: range)
         }
     }
 
@@ -1705,7 +1778,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         for match in kbd.matches(in: storage.string, range: fullRange)
         where !intersects(match.range, excludedRanges + protectedRanges) {
             let displayText = source.substring(with: match.range(at: 1))
-            let font = NSFont.monospacedSystemFont(ofSize: scaled(13), weight: .medium)
+            let font = typeface.monospacedFont(ofSize: scaled(13), weight: .medium)
             let textSize = (displayText as NSString).size(withAttributes: [.font: font])
             let size = NSSize(
                 width: ceil(textSize.width + scaled(12)),
@@ -2487,7 +2560,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 storage.addAttribute(.backgroundColor, value: backgroundColor, range: match.range)
             }
             if let trait {
-                let baseFont = NSFont.monospacedSystemFont(
+                let baseFont = typeface.monospacedFont(
                     ofSize: scaled(15),
                     weight: trait == .boldFontMask ? .semibold : .regular
                 )

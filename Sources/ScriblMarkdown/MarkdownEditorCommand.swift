@@ -15,6 +15,9 @@ public struct MarkdownEditorCommand: Equatable {
         case numberedList
         case checklist
         case codeBlock
+        /// Links the selection, or inserts a link labelled `title` (or the destination).
+        case link(title: String?, destination: String)
+        case horizontalRule
     }
 
     public let id = UUID()

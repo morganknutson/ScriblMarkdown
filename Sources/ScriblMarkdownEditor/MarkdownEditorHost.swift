@@ -48,6 +48,24 @@ public struct MarkdownLinkedDocument: Equatable {
     }
 }
 
+/// A foreground color for a range of a code block's content.
+public struct MarkdownCodeColorRun: Equatable {
+    public let range: NSRange
+    public let color: NSColor
+
+    public init(range: NSRange, color: NSColor) {
+        self.range = range
+        self.color = color
+    }
+}
+
+/// Syntax-colors fenced code blocks. It runs on the main thread on every restyle, so
+/// implementations should be fast or cache by input.
+public protocol MarkdownCodeHighlighting: AnyObject {
+    /// Color runs for `code`, with ranges relative to `code`.
+    func colorRuns(forCode code: String, language: String?) -> [MarkdownCodeColorRun]
+}
+
 /// Connects the editor to the app hosting it: the documents its links can embed, how
 /// they open, web previews, and diagnostics. Every requirement has a default, so a host
 /// only implements what it supports.
@@ -57,6 +75,7 @@ public protocol MarkdownEditorHost: AnyObject {
     /// Lowercased path extensions of files that count as linkable documents.
     var linkableDocumentExtensions: Set<String> { get }
     var webLinkMetadataProvider: (any WebLinkMetadataProviding)? { get }
+    var codeHighlighter: (any MarkdownCodeHighlighting)? { get }
 
     /// Card details for a document in `linkableDocumentURLs`, or nil when it can't be described.
     func linkedDocument(at url: URL) -> MarkdownLinkedDocument?
@@ -69,6 +88,7 @@ public extension MarkdownEditorHost {
     var linkableDocumentURLs: [URL] { [] }
     var linkableDocumentExtensions: Set<String> { ["md", "markdown"] }
     var webLinkMetadataProvider: (any WebLinkMetadataProviding)? { nil }
+    var codeHighlighter: (any MarkdownCodeHighlighting)? { nil }
 
     func linkedDocument(at url: URL) -> MarkdownLinkedDocument? { nil }
     func openLinkedDocument(at url: URL) -> Bool { false }

@@ -21,6 +21,8 @@ final class TestMarkdownEditorHost: MarkdownEditorHost {
     }
 
     var linkableDocumentURLs: [URL] { Array(documents.keys) }
+    var codeHighlighterOverride: (any MarkdownCodeHighlighting)?
+    var codeHighlighter: (any MarkdownCodeHighlighting)? { codeHighlighterOverride }
 
     func linkedDocument(at url: URL) -> MarkdownLinkedDocument? {
         documents[url]
