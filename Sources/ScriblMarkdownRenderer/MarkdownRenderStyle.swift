@@ -1,5 +1,7 @@
 #if os(macOS)
 import AppKit
+import ScriblMarkdown
+import ScriblMarkdownUI
 
 /// How a rendered Markdown document looks. Hosts build one per surface (a chat message,
 /// a plan card, a help page) from their own theme.
@@ -57,6 +59,16 @@ public struct MarkdownRenderStyle {
     public var bulletSymbols: [String]
     public var taskSymbols: (unchecked: String, checked: String)
     public var thematicBreakText: String
+    /// Draws the shared look's markers with these colors: checklist boxes, rules, keycaps
+    /// and disclosure chevrons, with accent footnote references. Nil draws checklists and
+    /// rules with `taskSymbols` and `thematicBreakText`.
+    public var markerPalette: MarkdownEditorPalette?
+    /// Checked checklist items are struck through in this color; nil leaves them as is.
+    public var completedTaskColor: NSColor?
+    /// Keycaps and footnote numbers.
+    public var keycapFont: NSFont
+    /// How much the theme scales sizes designed for a 17pt body.
+    public var scale: CGFloat
 
     public init(
         bodyFont: NSFont,
@@ -112,6 +124,55 @@ public struct MarkdownRenderStyle {
         self.bulletSymbols = bulletSymbols.isEmpty ? ["\u{2022}"] : bulletSymbols
         self.taskSymbols = taskSymbols
         self.thematicBreakText = thematicBreakText
+        self.markerPalette = nil
+        self.completedTaskColor = nil
+        self.scale = bodyFont.pointSize / MarkdownVisualSpec.referenceBodySize
+        self.keycapFont = NSFont.monospacedSystemFont(ofSize: 13 * scale, weight: .medium)
+    }
+
+    /// Spacing for a display surface.
+    public enum Spacing {
+        /// Long-form documents: paragraph spacing between blocks.
+        case document
+        /// Cards and short descriptions: tight spacing.
+        case compact
+    }
+
+    /// The shared look in `theme`: headings 1–6 on the shared scale, depth bullets,
+    /// hierarchical list labels, drawn checklists and rules, plain quotes with an accent
+    /// bar, and the theme's inline code and highlight tokens.
+    public init(theme: MarkdownTheme, spacing: Spacing = .document, lineBreaks: LineBreaks = .preserved) {
+        let palette = theme.palette
+        let isDocument = spacing == .document
+        self.init(
+            bodyFont: theme.bodyFont,
+            headingFonts: (1...6).map(theme.headingFont(level:)),
+            codeFont: theme.inlineCodeFont,
+            textColor: palette.text,
+            headingColor: palette.text,
+            quoteTextColor: palette.text,
+            mutedColor: palette.tertiaryText,
+            linkColor: palette.link,
+            codeColor: palette.inlineCodeText,
+            codeBackgroundColor: palette.inlineCodeBackground,
+            highlightColor: palette.highlightBackground,
+            quoteBarColor: palette.accent,
+            lineSpacing: theme.scaled(isDocument ? 3 : 1),
+            blockSpacing: theme.scaled(isDocument ? 10 : 4),
+            itemSpacing: theme.scaled(isDocument ? 3 : 1),
+            headingSpacingBefore: theme.scaled(isDocument ? 8 : 4),
+            listIndent: theme.scaled(isDocument ? 22 : 16),
+            listMarkerInset: theme.scaled(isDocument ? 4 : 2),
+            quoteIndent: theme.scaled(14),
+            codeBlockIndent: theme.scaled(12),
+            lineBreaks: lineBreaks,
+            orderedListLabels: .hierarchical,
+            bulletSymbols: MarkdownVisualSpec.bulletSymbols
+        )
+        markerPalette = palette
+        completedTaskColor = palette.completedText
+        scale = theme.scaled(1)
+        keycapFont = theme.typeface.monospacedFont(ofSize: theme.scaled(13), weight: .medium)
     }
 
     func headingFont(level: Int) -> NSFont {

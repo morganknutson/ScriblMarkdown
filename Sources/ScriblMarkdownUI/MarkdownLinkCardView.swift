@@ -3,12 +3,13 @@ import AppKit
 import Foundation
 import ScriblMarkdown
 
-enum ArtifactCardContent: Equatable {
+/// What a link card shows: a web page preview (or its loading state) or a linked document.
+public enum MarkdownLinkCardContent: Equatable {
     case loading(url: URL)
     case web(WebLinkMetadata)
     case document(MarkdownLinkedDocument, isBroken: Bool)
 
-    var accessibilityLabel: String {
+    public var accessibilityLabel: String {
         switch self {
         case .loading(let url): "Loading link preview for \(url.host ?? url.absoluteString)"
         case .web(let metadata):
@@ -23,7 +24,7 @@ enum ArtifactCardContent: Equatable {
         }
     }
 
-    var displaySummary: String? {
+    public var displaySummary: String? {
         let value: String
         switch self {
         case .loading:
@@ -39,7 +40,8 @@ enum ArtifactCardContent: Equatable {
         return cleaned.isEmpty ? nil : cleaned
     }
 
-    var preferredHeight: CGFloat {
+    /// The card's height: taller when a web preview has a summary.
+    public var preferredHeight: CGFloat {
         switch self {
         case .web where displaySummary != nil:
             return 100
@@ -49,20 +51,29 @@ enum ArtifactCardContent: Equatable {
     }
 }
 
-final class ArtifactCardView: NSView, NSDraggingSource {
-    static let noteHeight: CGFloat = 88
+/// The card a URL or document link alone on its line becomes: media on the left, an
+/// eyebrow, title and summary, and an arrow. Clicking activates it; when the host
+/// supplies `dragPasteboardItem`, dragging it starts a drag with that item (the editor uses
+/// this to reorder cards).
+public final class MarkdownLinkCardView: NSView, NSDraggingSource {
+    public static let noteHeight: CGFloat = 88
 
-    var onActivate: (() -> Void)?
-    var palette: MarkdownEditorPalette = .system {
+    public var onActivate: (() -> Void)?
+    public var theme: MarkdownTheme {
+        didSet { palette = theme.palette }
+    }
+    /// The pasteboard item a drag carries; nil makes the card click-only.
+    public var dragPasteboardItem: (() -> NSPasteboardItem?)?
+
+    private var palette: MarkdownEditorPalette {
         didSet {
             guard palette != oldValue else { return }
             applyPalette()
         }
     }
-    var reorderPayload: ArtifactReorderDragPayload?
 
     private let mediaBackdrop = NSView()
-    private let imageView = ArtifactMediaImageView()
+    private let imageView = MarkdownLinkCardMediaView()
     private let eyebrowLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
     private let summaryLabel = NSTextField(wrappingLabelWithString: "")
@@ -78,8 +89,10 @@ final class ArtifactCardView: NSView, NSDraggingSource {
     private var didBeginDrag = false
     private var usesThumbnail = false
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    public init(theme: MarkdownTheme) {
+        self.theme = theme
+        palette = theme.palette
+        super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 10
         layer?.cornerCurve = .continuous
@@ -166,9 +179,10 @@ final class ArtifactCardView: NSView, NSDraggingSource {
         setAccessibilityRole(.button)
     }
 
+    @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
-    func configure(_ content: ArtifactCardContent) {
+    public func configure(_ content: MarkdownLinkCardContent) {
         setAccessibilityLabel(content.accessibilityLabel)
         let summary = content.displaySummary
         summaryLabel.stringValue = summary ?? ""
@@ -233,12 +247,12 @@ final class ArtifactCardView: NSView, NSDraggingSource {
         needsLayout = true
     }
 
-    override func hitTest(_ point: NSPoint) -> NSView? {
+    public override func hitTest(_ point: NSPoint) -> NSView? {
         guard super.hitTest(point) != nil else { return nil }
         return self
     }
 
-    override func updateTrackingAreas() {
+    public override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingAreaReference { removeTrackingArea(trackingAreaReference) }
         let tracking = NSTrackingArea(
@@ -256,46 +270,43 @@ final class ArtifactCardView: NSView, NSDraggingSource {
         trackingAreaReference = tracking
     }
 
-    override func resetCursorRects() {
+    public override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .pointingHand)
     }
 
-    override func mouseEntered(with event: NSEvent) {
+    public override func mouseEntered(with event: NSEvent) {
         isHovered = true
         activeCursor.set()
         updateAppearance()
     }
 
-    override func mouseMoved(with event: NSEvent) {
+    public override func mouseMoved(with event: NSEvent) {
         activeCursor.set()
     }
 
-    override func cursorUpdate(with event: NSEvent) {
+    public override func cursorUpdate(with event: NSEvent) {
         activeCursor.set()
     }
 
-    override func mouseExited(with event: NSEvent) {
+    public override func mouseExited(with event: NSEvent) {
         isHovered = false
         NSCursor.arrow.set()
         updateAppearance()
     }
 
-    override func mouseDown(with event: NSEvent) {
+    public override func mouseDown(with event: NSEvent) {
         mouseDownPoint = convert(event.locationInWindow, from: nil)
         didBeginDrag = false
     }
 
-    override func mouseDragged(with event: NSEvent) {
+    public override func mouseDragged(with event: NSEvent) {
         guard !didBeginDrag,
               let mouseDownPoint,
               hypot(convert(event.locationInWindow, from: nil).x - mouseDownPoint.x,
                     convert(event.locationInWindow, from: nil).y - mouseDownPoint.y) > 4,
-              let reorderPayload,
-              let data = try? JSONEncoder().encode(reorderPayload) else { return }
+              let item = dragPasteboardItem?() else { return }
         didBeginDrag = true
-        let item = NSPasteboardItem()
-        item.setData(data, forType: ArtifactReorderDragPayload.pasteboardType)
         let draggingItem = NSDraggingItem(pasteboardWriter: item)
         let image = bitmapImageRepForCachingDisplay(in: bounds).map { representation -> NSImage in
             cacheDisplay(in: bounds, to: representation)
@@ -308,22 +319,22 @@ final class ArtifactCardView: NSView, NSDraggingSource {
         beginDraggingSession(with: [draggingItem], event: event, source: self)
     }
 
-    override func mouseUp(with event: NSEvent) {
+    public override func mouseUp(with event: NSEvent) {
         if !didBeginDrag { onActivate?() }
         mouseDownPoint = nil
     }
 
-    override func accessibilityPerformPress() -> Bool {
+    public override func accessibilityPerformPress() -> Bool {
         onActivate?()
         return true
     }
 
-    func draggingSession(
+    public func draggingSession(
         _ session: NSDraggingSession,
         sourceOperationMaskFor context: NSDraggingContext
     ) -> NSDragOperation { .move }
 
-    func draggingSession(
+    public func draggingSession(
         _ session: NSDraggingSession,
         endedAt screenPoint: NSPoint,
         operation: NSDragOperation
@@ -361,7 +372,7 @@ final class ArtifactCardView: NSView, NSDraggingSource {
     }
 }
 
-private final class ArtifactMediaImageView: NSImageView {
+private final class MarkdownLinkCardMediaView: NSImageView {
     var fillsBounds = false {
         didSet { needsDisplay = true }
     }

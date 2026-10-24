@@ -30,11 +30,11 @@ final class MarkdownArtifactIntegrationTests: XCTestCase {
         XCTAssertEqual(textView.string, text)
         XCTAssertEqual(textView.renderedArtifacts.count, 1)
         XCTAssertEqual(
-            textView.subviews.compactMap { $0 as? ArtifactCardView }.first?.frame.width,
+            textView.subviews.compactMap { $0 as? MarkdownLinkCardView }.first?.frame.width,
             300
         )
         let card = try XCTUnwrap(
-            textView.subviews.compactMap { $0 as? ArtifactCardView }.first
+            textView.subviews.compactMap { $0 as? MarkdownLinkCardView }.first
         )
         let artifactRange = try XCTUnwrap(textView.renderedArtifacts.first?.artifact.sourceRange)
         let layoutManager = try XCTUnwrap(textView.layoutManager)
@@ -215,7 +215,7 @@ final class MarkdownArtifactIntegrationTests: XCTestCase {
         coordinator.activate(artifact)
         XCTAssertEqual(host.openedURLs, [targetURL])
 
-        let card = ArtifactCardView(frame: NSRect(x: 0, y: 0, width: 320, height: ArtifactCardView.noteHeight))
+        let card = makeCard()
         card.configure(.document(.note("Target", preview: "Preview"), isBroken: false))
         card.layoutSubtreeIfNeeded()
         XCTAssertEqual(card.accessibilityRole(), .button)
@@ -225,9 +225,7 @@ final class MarkdownArtifactIntegrationTests: XCTestCase {
 
     @MainActor
     func testFallbackLinkIconMatchesBareNoteIconTreatment() throws {
-        let card = ArtifactCardView(
-            frame: NSRect(x: 0, y: 0, width: 320, height: ArtifactCardView.noteHeight)
-        )
+        let card = makeCard()
         card.configure(.document(.note("Note", preview: "Preview"), isBroken: false))
         card.layoutSubtreeIfNeeded()
         let noteImageView = try XCTUnwrap(card.subviews.first?.subviews.first as? NSImageView)
@@ -255,5 +253,11 @@ final class MarkdownArtifactIntegrationTests: XCTestCase {
             return constraint.constant
         }.sorted()
     }
+}
+@MainActor
+private func makeCard() -> MarkdownLinkCardView {
+    let card = MarkdownLinkCardView(theme: MarkdownTheme())
+    card.frame = NSRect(x: 0, y: 0, width: 320, height: MarkdownLinkCardView.noteHeight)
+    return card
 }
 #endif

@@ -11,6 +11,49 @@ public struct MarkdownEdit: Equatable {
         self.replacement = replacement
         self.selection = selection
     }
+
+    /// The edit that turns `source` into `result`: the smallest replacement between their
+    /// common prefix and suffix, which keeps undo and restyling local to what changed.
+    /// `selection` is in `result`'s coordinates.
+    public init(replacing source: String, with result: String, selection: NSRange) {
+        let old = source as NSString
+        let new = result as NSString
+        let limit = min(old.length, new.length)
+        var prefix = 0
+        while prefix < limit, old.character(at: prefix) == new.character(at: prefix) {
+            prefix += 1
+        }
+        // Never split a surrogate pair at the start of the changed range.
+        if prefix > 0, prefix < limit, UTF16.isLeadSurrogate(old.character(at: prefix - 1)) {
+            prefix -= 1
+        }
+        var suffix = 0
+        while suffix < limit - prefix,
+              old.character(at: old.length - 1 - suffix) == new.character(at: new.length - 1 - suffix) {
+            suffix += 1
+        }
+        if suffix > 0, suffix < limit - prefix,
+           UTF16.isTrailSurrogate(old.character(at: old.length - suffix)) {
+            suffix -= 1
+        }
+        self.init(
+            range: NSRange(location: prefix, length: old.length - prefix - suffix),
+            replacement: new.substring(with: NSRange(location: prefix, length: new.length - prefix - suffix)),
+            selection: selection
+        )
+    }
+
+    /// An edit that changes nothing: the rule handled the keystroke but had nothing to do.
+    public static func unchanged(selection: NSRange) -> MarkdownEdit {
+        MarkdownEdit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+    }
+
+    public var changesText: Bool { range.length > 0 || !replacement.isEmpty }
+
+    /// `source` with this edit applied.
+    public func applied(to source: String) -> String {
+        (source as NSString).replacingCharacters(in: range, with: replacement)
+    }
 }
 
 /// Source edits for inserting Markdown constructs, shared by every editor surface.

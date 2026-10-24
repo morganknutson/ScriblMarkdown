@@ -108,8 +108,8 @@ final class MarkdownArtifactSupportTests: XCTestCase {
 
     func testCardContentUsesCompactHeightWithoutUsefulWebSummary() {
         let url = URL(string: "https://example.com/path")!
-        let fallback = ArtifactCardContent.web(.fallback(for: url))
-        let rich = ArtifactCardContent.web(.init(
+        let fallback = MarkdownLinkCardContent.web(.fallback(for: url))
+        let rich = MarkdownLinkCardContent.web(.init(
             url: url,
             title: "Example",
             summary: "A useful description",
@@ -122,7 +122,7 @@ final class MarkdownArtifactSupportTests: XCTestCase {
         XCTAssertEqual(rich.displaySummary, "A useful description")
         XCTAssertEqual(rich.preferredHeight, 100)
         XCTAssertEqual(
-            ArtifactCardContent.document(
+            MarkdownLinkCardContent.document(
                 .note("Note", preview: "  Useful\npreview  "),
                 isBroken: false
             ).displaySummary,

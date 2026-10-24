@@ -129,6 +129,8 @@ final class MarkdownAttributedRendererTests: XCTestCase {
             case .codeBlock(let code, _): return "code:\(code)"
             case .table(let table): return "table:\(table.headers.joined(separator: ","))"
             case .image(let source, _): return "image:\(source)"
+            case .linkCard: return "card"
+            case .details: return "details"
             }
         }
         XCTAssertEqual(kinds, ["text:Intro", "code:code", "table:a,b", "image:x.png", "text:Outro"])

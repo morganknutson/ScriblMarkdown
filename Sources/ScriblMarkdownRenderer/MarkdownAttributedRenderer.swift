@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import ScriblMarkdown
+import ScriblMarkdownUI
 
 /// A piece of a rendered document. Text blocks render into attributed strings; code,
 /// tables and images are handed back for the host to show with its own views.
@@ -9,6 +10,10 @@ public enum MarkdownRenderedSegment {
     case codeBlock(code: String, language: String?)
     case table(MarkdownTableContent)
     case image(source: String, alternateText: String)
+    /// A paragraph that is only a web address or a document link, for the host to show as
+    /// a `MarkdownLinkCardView`.
+    case linkCard(MarkdownArtifactKind)
+    case details(summary: String, body: MarkdownDocument, isExpanded: Bool)
 }
 
 /// Renders a `MarkdownDocument` for display: markers removed, styled with a
@@ -27,15 +32,55 @@ public struct MarkdownAttributedRenderer {
 
     /// The document as text segments, with code blocks, tables and images split out so
     /// the host can show each with its own view.
-    public func segments(for document: MarkdownDocument, cache: MarkdownRenderCache? = nil) -> [MarkdownRenderedSegment] {
-        document.sections.enumerated().map { sectionIndex, section in
+    /// Lone links become `.linkCard` segments as `linkCards` allows; see
+    /// `MarkdownDocument.sections(linkCards:…)`.
+    public func segments(
+        for document: MarkdownDocument,
+        cache: MarkdownRenderCache? = nil,
+        linkCards: MarkdownLinkCardPolicy = .none,
+        linkableDocumentExtensions: Set<String> = ["md", "markdown"],
+        documentURL: URL? = nil,
+        libraryURLs: [URL] = []
+    ) -> [MarkdownRenderedSegment] {
+        document.sections(
+            linkCards: linkCards,
+            linkableDocumentExtensions: linkableDocumentExtensions,
+            documentURL: documentURL,
+            libraryURLs: libraryURLs
+        ).enumerated().map { sectionIndex, section in
             switch section {
             case .text(let text):
                 return .text(render(text, imageAttachment: nil, cache: cache, scope: sectionIndex + 1))
             case .codeBlock(let code, let language): return .codeBlock(code: code, language: language)
             case .table(let table): return .table(table)
             case .image(let source, let alternateText): return .image(source: source, alternateText: alternateText)
+            case .linkCard(let kind): return .linkCard(kind)
+            case .details(let summary, let body, let isExpanded):
+                return .details(summary: summary, body: body, isExpanded: isExpanded)
             }
+        }
+    }
+
+    /// Renders table cells in this style, for `MarkdownTableView`: bold headers, the
+    /// column's alignment, wrapping.
+    public var tableCellRenderer: MarkdownTableView.CellRenderer {
+        { text, isHeader, alignment in
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byWordWrapping
+            switch alignment {
+            case .leading: paragraph.alignment = .left
+            case .center: paragraph.alignment = .center
+            case .trailing: paragraph.alignment = .right
+            }
+            let font = isHeader ? NSFontManager.shared.convert(style.bodyFont, toHaveTrait: .boldFontMask) : style.bodyFont
+            return attributedString(
+                forInline: text,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: isHeader ? style.headingColor : style.textColor,
+                    .paragraphStyle: paragraph,
+                ]
+            )
         }
     }
 
@@ -139,11 +184,25 @@ public struct MarkdownAttributedRenderer {
             paragraph.defaultTabInterval = style.listIndent
             paragraph.headIndent = indent
             paragraph.firstLineHeadIndent = indent - style.listIndent + style.listMarkerInset
-            content = NSMutableAttributedString(
-                string: marker(for: item) + "\t",
-                attributes: baseAttributes(font: style.bodyFont, color: style.textColor)
-            )
-            content.append(inline(item.text, attributes: baseAttributes(font: style.bodyFont, color: style.textColor), footnoteOrdinals: ordinals))
+            let markerAttributes = baseAttributes(font: style.bodyFont, color: style.textColor)
+            if case .task(let isChecked) = item.marker, let palette = style.markerPalette {
+                content = MarkdownMarkerAttachmentCell.string(
+                    .checklist(isChecked: isChecked),
+                    palette: palette,
+                    textFont: style.bodyFont,
+                    scale: style.scale,
+                    attributes: markerAttributes
+                )
+                content.append(NSAttributedString(string: "\t", attributes: markerAttributes))
+            } else {
+                content = NSMutableAttributedString(string: marker(for: item) + "\t", attributes: markerAttributes)
+            }
+            var itemAttributes = baseAttributes(font: style.bodyFont, color: style.textColor)
+            if case .task(true) = item.marker, let completed = style.completedTaskColor {
+                itemAttributes[.foregroundColor] = completed
+                itemAttributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+            }
+            content.append(inline(item.text, attributes: itemAttributes, footnoteOrdinals: ordinals))
 
         case .quote(let depth, let text):
             let indent = style.quoteIndent * CGFloat(depth)
@@ -178,23 +237,54 @@ public struct MarkdownAttributedRenderer {
 
         case .thematicBreak:
             paragraph = paragraphStyle(spacingAfter: spacingAfter)
-            content = NSMutableAttributedString(
-                string: style.thematicBreakText,
-                attributes: baseAttributes(font: style.bodyFont, color: style.mutedColor)
-            )
+            if let palette = style.markerPalette {
+                // A zero-width line that `MarkdownDecorationLayoutManager` draws the rule across.
+                var attributes = baseAttributes(font: style.bodyFont, color: style.mutedColor)
+                attributes[.markdownRule] = palette.separator
+                content = NSMutableAttributedString(string: "\u{200B}", attributes: attributes)
+            } else {
+                content = NSMutableAttributedString(
+                    string: style.thematicBreakText,
+                    attributes: baseAttributes(font: style.bodyFont, color: style.mutedColor)
+                )
+            }
 
         case .footnote(_, let ordinal, let text):
             paragraph = paragraphStyle(spacingAfter: spacingAfter)
-            content = NSMutableAttributedString(
-                string: "\(ordinal). ",
-                attributes: baseAttributes(font: style.bodyFont, color: style.mutedColor)
-            )
-            content.append(inline(text, attributes: baseAttributes(font: style.bodyFont, color: style.textColor), footnoteOrdinals: ordinals))
+            if let palette = style.markerPalette {
+                // The editor's footnotes: a bold number, smaller secondary text, set apart
+                // from the body above.
+                let size = MarkdownVisualSpec.referenceFootnoteSize * style.scale
+                let font = NSFont(descriptor: style.bodyFont.fontDescriptor, size: size) ?? style.bodyFont
+                if case .footnote? = previous {} else { paragraph.paragraphSpacingBefore = 18 * style.scale }
+                content = NSMutableAttributedString(
+                    string: "\(ordinal)  ",
+                    attributes: baseAttributes(font: NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask), color: palette.secondaryText)
+                )
+                content.append(inline(text, attributes: baseAttributes(font: font, color: palette.secondaryText), footnoteOrdinals: ordinals))
+            } else {
+                content = NSMutableAttributedString(
+                    string: "\(ordinal). ",
+                    attributes: baseAttributes(font: style.bodyFont, color: style.mutedColor)
+                )
+                content.append(inline(text, attributes: baseAttributes(font: style.bodyFont, color: style.textColor), footnoteOrdinals: ordinals))
+            }
 
         case .details(let summary, let body, _):
             paragraph = paragraphStyle(spacingAfter: spacingAfter)
             let summaryFont = NSFontManager.shared.convert(style.bodyFont, toHaveTrait: .boldFontMask)
-            content = inline(summary, attributes: baseAttributes(font: summaryFont, color: style.textColor), footnoteOrdinals: ordinals)
+            content = NSMutableAttributedString()
+            if let palette = style.markerPalette {
+                // Display surfaces show the whole body, so the chevron reads as open.
+                content.append(MarkdownMarkerAttachmentCell.string(
+                    .disclosure(isExpanded: true),
+                    palette: palette,
+                    textFont: summaryFont,
+                    scale: style.scale,
+                    attributes: baseAttributes(font: summaryFont, color: style.textColor)
+                ))
+            }
+            content.append(inline(summary, attributes: baseAttributes(font: summaryFont, color: style.textColor), footnoteOrdinals: ordinals))
             let summaryParagraph = paragraphStyle(spacingAfter: style.itemSpacing)
             applyParagraphStyle(summaryParagraph, to: content)
             let bodyText = NSMutableAttributedString(attributedString: attributedString(for: body))
@@ -219,7 +309,7 @@ public struct MarkdownAttributedRenderer {
             paragraph.alignment = .center
             content = NSMutableAttributedString(
                 string: MarkdownMathDisplay.text(for: expression),
-                attributes: baseAttributes(font: style.bodyFont, color: style.textColor)
+                attributes: baseAttributes(font: MarkdownDrawnMarkers.mathFont(ofSize: 20 * style.scale), color: style.textColor)
             )
         }
 
@@ -360,7 +450,18 @@ public struct MarkdownAttributedRenderer {
         let result = NSMutableAttributedString()
         let baseFont = (base[.font] as? NSFont) ?? style.bodyFont
         for run in MarkdownInlineParser.runs(in: markdown, footnoteOrdinals: footnoteOrdinals) {
-            result.append(NSAttributedString(string: run.text, attributes: attributes(for: run, base: base, baseFont: baseFont)))
+            let runAttributes = attributes(for: run, base: base, baseFont: baseFont)
+            if run.isKeycap, let palette = style.markerPalette {
+                result.append(MarkdownMarkerAttachmentCell.string(
+                    .keycap(run.text, font: style.keycapFont),
+                    palette: palette,
+                    textFont: baseFont,
+                    scale: style.scale,
+                    attributes: runAttributes
+                ))
+            } else {
+                result.append(NSAttributedString(string: run.text, attributes: runAttributes))
+            }
         }
         return result
     }
@@ -401,7 +502,18 @@ public struct MarkdownAttributedRenderer {
             attributes[.baselineOffset] = styles.contains(.subscript) ? -size * 0.2 : size * 0.35
         }
         if run.footnoteOrdinal != nil {
-            attributes[.foregroundColor] = style.mutedColor
+            if let palette = style.markerPalette {
+                attributes[.foregroundColor] = palette.accent
+                font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+            } else {
+                attributes[.foregroundColor] = style.mutedColor
+            }
+        }
+        if run.isMath {
+            font = MarkdownDrawnMarkers.mathFont(ofSize: font.pointSize)
+        }
+        if run.isKeycap, style.markerPalette == nil {
+            font = NSFont(descriptor: style.codeFont.fontDescriptor, size: font.pointSize) ?? style.codeFont
         }
         if let destination = run.link {
             attributes[.foregroundColor] = style.linkColor

@@ -125,6 +125,8 @@ public struct MarkdownHTMLRenderer {
                 return "<sup><a href=\"#fn\(ordinal)\">\(ordinal)</a></sup>"
             }
             var html = escape(run.text)
+            if run.isKeycap { html = "<kbd>\(html)</kbd>" }
+            if run.isMath { html = "<span class=\"math\">\(html)</span>" }
             let tags: [(MarkdownInlineSpan.Style, String)] = [
                 (.code, "code"), (.strikethrough, "del"), (.highlight, "mark"),
                 (.subscript, "sub"), (.superscript, "sup"), (.emphasis, "em"), (.strong, "strong"),
