@@ -2,6 +2,7 @@
 import AppKit
 import Foundation
 import ScriblMarkdown
+import ScriblMarkdownHTML
 import UniformTypeIdentifiers
 
 final class MarkdownEditorTextView: NSTextView {
@@ -20,7 +21,7 @@ final class MarkdownEditorTextView: NSTextView {
 
     struct RenderedArtifact {
         let artifact: MarkdownArtifact
-        let content: ArtifactCardContent
+        let content: MarkdownLinkCardContent
         let height: CGFloat
     }
 
@@ -44,6 +45,27 @@ final class MarkdownEditorTextView: NSTextView {
     struct RenderedCodeBlock {
         let sourceRange: NSRange
         let contentRange: NSRange
+        /// The opening fence line, drawn as the block's header.
+        let headerLineRange: NSRange?
+        let language: String?
+        /// The code without fence indentation, for copying and popping out.
+        let code: String
+        let lineNumberFont: NSFont
+        let gutterWidth: CGFloat
+    }
+
+    struct RenderedBullet {
+        let markerLocation: Int
+        let symbol: String
+        let font: NSFont
+    }
+
+    struct RenderedTable {
+        let sourceRange: NSRange
+        let headerLineRange: NSRange
+        let rowLineRanges: [NSRange]
+        let width: CGFloat
+        let content: MarkdownTableContent
     }
 
     struct RenderedHorizontalRule {
@@ -139,7 +161,21 @@ final class MarkdownEditorTextView: NSTextView {
         didSet { needsDisplay = true }
     }
     var renderedCodeBlocks: [RenderedCodeBlock] = [] {
+        didSet {
+            synchronizeCodeBlockHeaders()
+            needsLayout = true
+            needsDisplay = true
+        }
+    }
+    var renderedBullets: [RenderedBullet] = [] {
         didSet { needsDisplay = true }
+    }
+    var renderedTables: [RenderedTable] = [] {
+        didSet {
+            synchronizeTableButtons()
+            needsLayout = true
+            needsDisplay = true
+        }
     }
     var renderedHorizontalRules: [RenderedHorizontalRule] = [] {
         didSet { needsDisplay = true }
@@ -176,13 +212,19 @@ final class MarkdownEditorTextView: NSTextView {
     var titlePlaceholder: TitlePlaceholder? {
         didSet { needsDisplay = true }
     }
-    var palette: MarkdownEditorPalette = .system {
+    var theme = MarkdownTheme() {
         didSet {
-            guard palette != oldValue else { return }
-            artifactViews.values.forEach { $0.palette = palette }
+            artifactViews.values.forEach { $0.theme = theme }
+            codeBlockHeaders.values.forEach { $0.apply(theme) }
+            tableButtons.values.forEach { $0.contentTintColor = theme.surface.controlTint }
             needsDisplay = true
         }
     }
+    var palette: MarkdownEditorPalette { theme.palette }
+    /// Renders a table cell for a popped-out table.
+    var tableCellRenderer: MarkdownTableView.CellRenderer?
+    /// Runs a keyboard shortcut's command; set by the controller.
+    var performCommand: ((MarkdownEditorCommand.Action) -> Void)?
     var recordEditorEvent: ((String, [String: String]) -> Void)?
     /// Lowercased extensions of files that drop in as linked-document cards.
     var linkableDocumentExtensions: Set<String> = ["md", "markdown"]
@@ -196,7 +238,10 @@ final class MarkdownEditorTextView: NSTextView {
     var activateArtifact: ((MarkdownArtifact) -> Void)?
     var widthDidChange: (() -> Void)?
     private var reportedWidth: CGFloat = 0
-    private var artifactViews: [String: ArtifactCardView] = [:]
+    private var artifactViews: [String: MarkdownLinkCardView] = [:]
+    private var codeBlockHeaders: [Int: MarkdownCodeBlockHeaderView] = [:]
+    private var tableButtons: [Int: MarkdownHoverButton] = [:]
+    private var previewPanel: NSPanel?
     private var artifactInsertionY: CGFloat?
     private var imageInsertionRect: NSRect?
     private var pasteEventMonitor: Any?
@@ -276,6 +321,22 @@ final class MarkdownEditorTextView: NSTextView {
     override func layout() {
         super.layout()
         layoutArtifactViews()
+        layoutCodeBlockHeaders()
+        layoutTableButtons()
+    }
+
+    /// The shared keyboard shortcuts, handled here so every host gets the same set.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self,
+           let shortcut = MarkdownEditorShortcut.matching(
+               key: event.characters(byApplyingModifiers: []) ?? "",
+               modifiers: MarkdownEditorShortcut.Modifiers(event.modifierFlags)
+           ),
+           let performCommand {
+            performCommand(shortcut.action)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func drawInsertionPoint(
@@ -324,8 +385,25 @@ final class MarkdownEditorTextView: NSTextView {
            insertWebURLs?(webURLs, selectedRange()) == true {
             return
         }
+        if let markdown = richTextMarkdown(from: pasteboard) {
+            recordEditorEvent?("Markdown rich text paste converted", [:])
+            insertText(markdown, replacementRange: selectedRange())
+            return
+        }
         super.paste(sender)
     }
+
+    /// Rich text from the web, Notes or Pages as Markdown, or nil to paste plain text:
+    /// inside code blocks, for HTML without Markdown-bearing elements (colored code from
+    /// an editor), and for very large clipboards that would stall typing to convert.
+    private func richTextMarkdown(from pasteboard: NSPasteboard) -> String? {
+        guard !MarkdownEditingRules.isInsideCodeBlock(selectedRange().location, in: string),
+              let html = pasteboard.string(forType: .html),
+              (html as NSString).length <= Self.maximumConvertedHTMLLength else { return nil }
+        return MarkdownHTMLConverter().markdownForPaste(html: html, plainText: pasteboard.string(forType: .string))
+    }
+
+    private static let maximumConvertedHTMLLength = 1_000_000
 
     override func resetCursorRects() {
         super.resetCursorRects()
@@ -434,11 +512,13 @@ final class MarkdownEditorTextView: NSTextView {
             if renderedChecklist(at: point)?.stateRange == rendered.stateRange {
                 toggleChecklist?(rendered.stateRange, !rendered.isChecked)
             }
-        } else if let rendered = mouseDownImage, !didBeginImageDrag, let window {
-            ImagePreviewWindowController.shared.present(
+        } else if let rendered = mouseDownImage, !didBeginImageDrag {
+            previewPanel = MarkdownImagePreviewPanel.present(
                 image: rendered.image,
-                fileURL: rendered.url,
-                from: window
+                originalData: try? Data(contentsOf: rendered.url),
+                mediaType: UTType(filenameExtension: rendered.url.pathExtension)?.preferredMIMEType,
+                title: rendered.url.deletingPathExtension().lastPathComponent,
+                from: self
             )
         } else if mouseDownImage == nil {
             super.mouseUp(with: event)
@@ -753,10 +833,13 @@ final class MarkdownEditorTextView: NSTextView {
             guard let rect = orderedListRect(for: rendered), rect.intersects(dirtyRect) else { continue }
             drawOrderedListMarker(rendered, in: rect)
         }
+        for rendered in renderedBullets {
+            guard let rect = bulletRect(for: rendered), rect.intersects(dirtyRect) else { continue }
+            drawBullet(rendered, in: rect)
+        }
         for rendered in renderedHorizontalRules {
             guard let rect = horizontalRuleRect(for: rendered), rect.intersects(dirtyRect) else { continue }
-            palette.separator.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 0.5, yRadius: 0.5).fill()
+            MarkdownDrawnMarkers.drawRule(in: rect, palette: palette)
         }
         for rendered in renderedMath {
             guard let rect = mathRect(for: rendered), rect.intersects(dirtyRect) else { continue }
@@ -779,24 +862,7 @@ final class MarkdownEditorTextView: NSTextView {
         }
         for rendered in renderedKeycaps {
             guard let rect = keycapRect(for: rendered), rect.intersects(dirtyRect) else { continue }
-            let background = palette.text.withAlphaComponent(0.10)
-            let border = palette.separator.withAlphaComponent(0.72)
-            let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
-            background.setFill()
-            path.fill()
-            border.setStroke()
-            path.lineWidth = 1
-            path.stroke()
-            let textSize = (rendered.displayText as NSString).size(withAttributes: [
-                .font: rendered.font
-            ])
-            rendered.displayText.draw(at: NSPoint(
-                x: rect.midX - textSize.width / 2,
-                y: rect.midY - textSize.height / 2
-            ), withAttributes: [
-                .font: rendered.font,
-                .foregroundColor: palette.text
-            ])
+            MarkdownDrawnMarkers.drawKeycap(rendered.displayText, in: rect, font: rendered.font, palette: palette)
         }
         for rendered in renderedFootnoteReferences {
             guard let rect = inlineReplacementRect(
@@ -837,22 +903,12 @@ final class MarkdownEditorTextView: NSTextView {
             guard let rect = detailsSummaryRect(for: rendered), rect.intersects(dirtyRect) else {
                 continue
             }
-            let center = NSPoint(x: textContainerOrigin.x + 7, y: rect.midY)
-            let chevron = NSBezierPath()
-            if rendered.isExpanded {
-                chevron.move(to: NSPoint(x: center.x - 4, y: center.y - 2))
-                chevron.line(to: NSPoint(x: center.x, y: center.y + 2))
-                chevron.line(to: NSPoint(x: center.x + 4, y: center.y - 2))
-            } else {
-                chevron.move(to: NSPoint(x: center.x - 2, y: center.y - 4))
-                chevron.line(to: NSPoint(x: center.x + 2, y: center.y))
-                chevron.line(to: NSPoint(x: center.x - 2, y: center.y + 4))
-            }
-            chevron.lineWidth = 1.6
-            chevron.lineCapStyle = .round
-            chevron.lineJoinStyle = .round
-            palette.secondaryText.setStroke()
-            chevron.stroke()
+            MarkdownDrawnMarkers.drawDisclosureChevron(
+                at: NSPoint(x: textContainerOrigin.x + 7, y: rect.midY),
+                isExpanded: rendered.isExpanded,
+                color: palette.secondaryText,
+                flipped: true
+            )
         }
         for rendered in renderedImages {
             guard let rect = imageRect(for: rendered) else { continue }
@@ -884,20 +940,79 @@ final class MarkdownEditorTextView: NSTextView {
     }
 
     private func drawBlockBackgrounds(in dirtyRect: NSRect) {
-        guard !renderedCodeBlocks.isEmpty else { return }
-        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        palette.text.withAlphaComponent(isDark ? 0.09 : 0.055).setFill()
+        let surface = theme.surface
         for rendered in renderedCodeBlocks {
             guard let rect = codeBlockRect(for: rendered), rect.intersects(dirtyRect) else { continue }
-            NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7).fill()
+            surface.background.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: surface.cornerRadius, yRadius: surface.cornerRadius).fill()
+            drawLineNumbers(for: rendered, in: dirtyRect)
+        }
+        for rendered in renderedTables {
+            guard let frame = tableRect(for: rendered), frame.intersects(dirtyRect) else { continue }
+            drawTableGrid(rendered, in: frame)
         }
     }
 
     private func drawBlockQuoteBars(in dirtyRect: NSRect) {
-        palette.secondaryText.withAlphaComponent(0.42).setFill()
+        palette.accent.setFill()
+        let radius = Self.quoteBarWidth / 2
         for rect in blockQuoteBarRects() where rect.intersects(dirtyRect) {
-            NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
         }
+    }
+
+    static let quoteBarWidth: CGFloat = 3
+
+    /// Line numbers in the code block's gutter, level with each source line's first
+    /// line fragment.
+    private func drawLineNumbers(for rendered: RenderedCodeBlock, in dirtyRect: NSRect) {
+        guard let layoutManager else { return }
+        let source = string as NSString
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: rendered.lineNumberFont,
+            .foregroundColor: theme.surface.gutterText
+        ]
+        let padding = MarkdownCodeBlockLayout.gutterPadding
+        let numberRight = textContainerOrigin.x + rendered.gutterWidth - padding
+        var location = rendered.contentRange.location
+        var number = 1
+        while location < NSMaxRange(rendered.contentRange), location < source.length {
+            let glyph = layoutManager.glyphIndexForCharacter(at: location)
+            let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let baseline = textContainerOrigin.y + line.minY + layoutManager.location(forGlyphAt: glyph).y
+            let label = "\(number)" as NSString
+            let size = label.size(withAttributes: attributes)
+            let origin = NSPoint(x: numberRight - size.width, y: baseline - rendered.lineNumberFont.ascender)
+            if NSRect(origin: origin, size: size).intersects(dirtyRect) {
+                label.draw(at: origin, withAttributes: attributes)
+            }
+            location = NSMaxRange(source.lineRange(for: NSRange(location: location, length: 0)))
+            number += 1
+        }
+    }
+
+    /// A table's border, header fill and row dividers, drawn under its source text.
+    private func drawTableGrid(_ rendered: RenderedTable, in frame: NSRect) {
+        let surface = theme.surface
+        let radius = surface.cornerRadius
+        let outline = NSBezierPath(roundedRect: frame.insetBy(dx: surface.borderWidth / 2, dy: surface.borderWidth / 2), xRadius: radius, yRadius: radius)
+        surface.tableBodyBackground.setFill()
+        outline.fill()
+        if let header = rowRect(for: rendered.headerLineRange) {
+            NSGraphicsContext.saveGraphicsState()
+            outline.addClip()
+            surface.tableHeaderBackground.setFill()
+            NSRect(x: frame.minX, y: frame.minY, width: frame.width, height: header.maxY - frame.minY).fill()
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        surface.tableRowDivider.setFill()
+        for lineRange in [rendered.headerLineRange] + rendered.rowLineRanges.dropLast() {
+            guard let row = rowRect(for: lineRange) else { continue }
+            NSRect(x: frame.minX, y: row.maxY - surface.borderWidth / 2, width: frame.width, height: surface.borderWidth).fill()
+        }
+        surface.tableBorder.setStroke()
+        outline.lineWidth = surface.borderWidth
+        outline.stroke()
     }
 
     func blockQuoteBarRects() -> [NSRect] {
@@ -935,7 +1050,7 @@ final class MarkdownEditorTextView: NSTextView {
                 let rect = NSRect(
                     x: textContainerOrigin.x + CGFloat(level) * 16,
                     y: textContainerOrigin.y + firstLine.minY - 2,
-                    width: 2,
+                    width: Self.quoteBarWidth,
                     height: lastLine.maxY - firstLine.minY + 4
                 )
                 rects.append(rect)
@@ -1035,7 +1150,7 @@ final class MarkdownEditorTextView: NSTextView {
         )
     }
 
-    private func codeBlockRect(for rendered: RenderedCodeBlock) -> NSRect? {
+    func codeBlockRect(for rendered: RenderedCodeBlock) -> NSRect? {
         guard let layoutManager, let textContainer,
               rendered.contentRange.length > 0,
               rendered.contentRange.location < (string as NSString).length else { return nil }
@@ -1044,20 +1159,73 @@ final class MarkdownEditorTextView: NSTextView {
             actualCharacterRange: nil
         )
         guard glyphRange.length > 0 else { return nil }
-        let firstLine = layoutManager.lineFragmentRect(
-            forGlyphAt: glyphRange.location,
-            effectiveRange: nil
-        )
+        let top = codeBlockHeaderRect(for: rendered)?.minY
+            ?? textContainerOrigin.y + layoutManager.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil).minY
         let lastLine = layoutManager.lineFragmentRect(
             forGlyphAt: max(glyphRange.location, NSMaxRange(glyphRange) - 1),
             effectiveRange: nil
         )
         return NSRect(
             x: textContainerOrigin.x,
-            y: textContainerOrigin.y + firstLine.minY - 5,
+            y: top,
             width: max(40, textContainer.size.width),
-            height: lastLine.maxY - firstLine.minY + 10
+            height: textContainerOrigin.y + lastLine.maxY - top
         )
+    }
+
+    /// The opening fence line's rect, where the header sits.
+    func codeBlockHeaderRect(for rendered: RenderedCodeBlock) -> NSRect? {
+        guard let layoutManager, let textContainer, let headerLineRange = rendered.headerLineRange,
+              headerLineRange.location < (string as NSString).length else { return nil }
+        let glyph = layoutManager.glyphIndexForCharacter(at: headerLineRange.location)
+        let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        return NSRect(
+            x: textContainerOrigin.x,
+            y: textContainerOrigin.y + line.minY,
+            width: max(40, textContainer.size.width),
+            height: MarkdownCodeBlockHeaderView.height
+        )
+    }
+
+    /// The union of a source line's line fragments.
+    private func rowRect(for lineRange: NSRange) -> NSRect? {
+        guard let layoutManager, lineRange.location < (string as NSString).length else { return nil }
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return nil }
+        var rect = NSRect.null
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragment, _, _, _, _ in
+            rect = rect.union(fragment)
+        }
+        guard !rect.isNull else { return nil }
+        return rect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+    }
+
+    func tableRect(for rendered: RenderedTable) -> NSRect? {
+        guard let first = rowRect(for: rendered.headerLineRange),
+              let last = rowRect(for: rendered.rowLineRanges.last ?? rendered.headerLineRange) else { return nil }
+        return NSRect(x: textContainerOrigin.x, y: first.minY, width: rendered.width, height: last.maxY - first.minY)
+    }
+
+    func bulletRect(for rendered: RenderedBullet) -> NSRect? {
+        guard let layoutManager, let textContainer,
+              rendered.markerLocation < (string as NSString).length else { return nil }
+        let glyph = layoutManager.glyphIndexForCharacter(at: rendered.markerLocation)
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
+        let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        let baseline = textContainerOrigin.y + line.minY + layoutManager.location(forGlyphAt: glyph).y
+        return NSRect(
+            x: textContainerOrigin.x + glyphRect.minX,
+            y: baseline - rendered.font.ascender,
+            width: glyphRect.width,
+            height: rendered.font.ascender - rendered.font.descender
+        )
+    }
+
+    /// The depth's bullet symbol, centered over the hidden marker character.
+    private func drawBullet(_ rendered: RenderedBullet, in rect: NSRect) {
+        let attributes: [NSAttributedString.Key: Any] = [.font: rendered.font, .foregroundColor: palette.text]
+        let size = (rendered.symbol as NSString).size(withAttributes: attributes)
+        (rendered.symbol as NSString).draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.minY), withAttributes: attributes)
     }
 
     private func horizontalRuleRect(for rendered: RenderedHorizontalRule) -> NSRect? {
@@ -1236,25 +1404,7 @@ final class MarkdownEditorTextView: NSTextView {
     }
 
     private func drawChecklist(_ rendered: RenderedChecklist, in rect: NSRect) {
-        let box = NSBezierPath(roundedRect: rect.insetBy(dx: 0.75, dy: 0.75), xRadius: 3, yRadius: 3)
-        if rendered.isChecked {
-            palette.accent.setFill()
-            box.fill()
-
-            let check = NSBezierPath()
-            check.move(to: NSPoint(x: rect.minX + rect.width * 0.25, y: rect.midY))
-            check.line(to: NSPoint(x: rect.minX + rect.width * 0.43, y: rect.minY + rect.height * 0.68))
-            check.line(to: NSPoint(x: rect.minX + rect.width * 0.76, y: rect.minY + rect.height * 0.32))
-            check.lineWidth = 1.8
-            check.lineCapStyle = .round
-            check.lineJoinStyle = .round
-            palette.onAccent.setStroke()
-            check.stroke()
-        } else {
-            palette.tertiaryText.setStroke()
-            box.lineWidth = 1.5
-            box.stroke()
-        }
+        MarkdownDrawnMarkers.drawChecklistBox(in: rect, isChecked: rendered.isChecked, palette: palette, flipped: true)
     }
 
     func orderedListRect(for rendered: RenderedOrderedList) -> NSRect? {
@@ -1371,18 +1521,23 @@ final class MarkdownEditorTextView: NSTextView {
         }
         for rendered in renderedArtifacts {
             let view = artifactViews[rendered.artifact.id] ?? {
-                let view = ArtifactCardView(frame: .zero)
+                let view = MarkdownLinkCardView(theme: theme)
                 addSubview(view)
                 artifactViews[rendered.artifact.id] = view
                 return view
             }()
-            view.palette = palette
             view.configure(rendered.content)
-            view.reorderPayload = .init(
+            let payload = ArtifactReorderDragPayload(
                 blockLocation: rendered.artifact.blockRange.location,
                 blockLength: rendered.artifact.blockRange.length,
                 source: rendered.artifact.source
             )
+            view.dragPasteboardItem = {
+                guard let data = try? JSONEncoder().encode(payload) else { return nil }
+                let item = NSPasteboardItem()
+                item.setData(data, forType: ArtifactReorderDragPayload.pasteboardType)
+                return item
+            }
             view.onActivate = { [weak self] in self?.activateArtifact?(rendered.artifact) }
         }
     }
@@ -1407,6 +1562,104 @@ final class MarkdownEditorTextView: NSTextView {
                 height: rendered.height
             ).integral
         }
+    }
+
+    // MARK: - Block overlays
+
+    /// One header per code block with an opening fence, keyed by where the block starts.
+    private func synchronizeCodeBlockHeaders() {
+        let blocks = renderedCodeBlocks.filter { $0.headerLineRange != nil }
+        let validKeys = Set(blocks.map(\.sourceRange.location))
+        for (key, header) in codeBlockHeaders where !validKeys.contains(key) {
+            header.removeFromSuperview()
+            codeBlockHeaders[key] = nil
+        }
+        for rendered in blocks {
+            let key = rendered.sourceRange.location
+            let header = codeBlockHeaders[key] ?? {
+                let header = MarkdownCodeBlockHeaderView()
+                header.translatesAutoresizingMaskIntoConstraints = true
+                header.hidesLanguage = true
+                addSubview(header)
+                codeBlockHeaders[key] = header
+                return header
+            }()
+            header.configure(language: nil, filePath: nil, theme: theme)
+            header.copyText = { rendered.code }
+            header.onPopOut = { [weak self] in self?.popOutCode(rendered) }
+        }
+    }
+
+    private func layoutCodeBlockHeaders() {
+        for rendered in renderedCodeBlocks {
+            guard let header = codeBlockHeaders[rendered.sourceRange.location] else { continue }
+            if let rect = codeBlockHeaderRect(for: rendered) {
+                header.isHidden = false
+                header.frame = rect.integral
+            } else {
+                header.isHidden = true
+            }
+        }
+    }
+
+    private func popOutCode(_ rendered: RenderedCodeBlock) {
+        let preview = MarkdownCodeBlockView(theme: theme)
+        preview.isInPreview = true
+        preview.configure(code: rendered.code, language: rendered.language)
+        previewPanel = MarkdownContentPreviewPanel.present(
+            title: "Code Preview",
+            previewView: preview,
+            background: theme.surface.previewBackground,
+            from: self,
+            replacing: previewPanel as? MarkdownContentPreviewPanel
+        )
+    }
+
+    /// One pop-out button per table, at its top-right corner.
+    private func synchronizeTableButtons() {
+        let validKeys = Set(renderedTables.map(\.sourceRange.location))
+        for (key, button) in tableButtons where !validKeys.contains(key) {
+            button.removeFromSuperview()
+            tableButtons[key] = nil
+        }
+        for rendered in renderedTables {
+            let key = rendered.sourceRange.location
+            let button = tableButtons[key] ?? {
+                let button = MarkdownHoverButton(symbolName: "arrow.up.left.and.arrow.down.right", accessibilityLabel: "Pop Out Table")
+                button.translatesAutoresizingMaskIntoConstraints = true
+                addSubview(button)
+                tableButtons[key] = button
+                return button
+            }()
+            button.contentTintColor = theme.surface.controlTint
+            theme.surface.installTooltip(button, "Pop Out Table")
+            button.onPress = { [weak self] in self?.popOutTable(rendered) }
+        }
+    }
+
+    private func layoutTableButtons() {
+        for rendered in renderedTables {
+            guard let button = tableButtons[rendered.sourceRange.location] else { continue }
+            if let frame = tableRect(for: rendered) {
+                button.isHidden = false
+                button.frame = NSRect(x: frame.maxX - 28, y: frame.minY + 3, width: 24, height: 22).integral
+            } else {
+                button.isHidden = true
+            }
+        }
+    }
+
+    private func popOutTable(_ rendered: RenderedTable) {
+        guard let tableCellRenderer else { return }
+        let preview = MarkdownTableView(table: rendered.content, theme: theme, cellRenderer: tableCellRenderer)
+        preview.isInPreview = true
+        previewPanel = MarkdownContentPreviewPanel.present(
+            title: "Table Preview",
+            previewView: preview,
+            background: theme.surface.previewBackground,
+            from: self,
+            replacing: previewPanel as? MarkdownContentPreviewPanel
+        )
     }
 }
 #endif

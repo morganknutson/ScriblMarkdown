@@ -40,6 +40,30 @@ public struct MarkdownTableContent: Equatable, Sendable {
     }
 
     public var columnCount: Int { headers.count }
+
+    /// The cells and alignments of a table parsed from `source`.
+    public init(_ table: MarkdownTable, in source: String) {
+        let text = source as NSString
+        func cells(_ row: MarkdownTable.Row) -> [String] {
+            row.cells.map { text.substring(with: $0).replacingOccurrences(of: "\\|", with: "|") }
+        }
+        let headers = cells(table.header)
+        let delimiterCells = text.substring(with: table.delimiterRange)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "|"))
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let alignments = headers.indices.map { index -> MarkdownTableAlignment in
+            guard index < delimiterCells.count else { return .leading }
+            let cell = delimiterCells[index]
+            switch (cell.hasPrefix(":"), cell.hasSuffix(":")) {
+            case (true, true): return .center
+            case (false, true): return .trailing
+            default: return .leading
+            }
+        }
+        self.init(headers: headers, alignments: alignments, rows: table.rows.map(cells))
+    }
 }
 
 /// One block of a Markdown document. Text-bearing cases hold inline Markdown; parse it
@@ -66,6 +90,19 @@ public enum MarkdownDocumentSection: Equatable, Sendable {
     case codeBlock(code: String, language: String?)
     case table(MarkdownTableContent)
     case image(source: String, alternateText: String)
+    /// A paragraph that is only a web address or a document link, shown as a card.
+    case linkCard(MarkdownArtifactKind)
+}
+
+/// Which lone links display as cards.
+public enum MarkdownLinkCardPolicy: Equatable, Sendable {
+    /// Links stay inline text.
+    case none
+    /// Links to documents (`[Title](note.md)`) become cards; web addresses stay inline.
+    case documents
+    /// Document links and web addresses become cards. Web cards fetch a preview, so
+    /// surfaces that show many machine-written URLs (chat) use `.documents` or `.none`.
+    case all
 }
 
 /// Markdown parsed into display blocks with the same parsers the live editor uses, so a
@@ -90,6 +127,27 @@ public struct MarkdownDocument: Equatable, Sendable {
     /// and images between them, which hosts usually show with their own views. Each text
     /// section is a document of its own, sharing this document's footnote numbers.
     public var sections: [MarkdownDocumentSection] {
+        sections(linkCards: .none)
+    }
+
+    /// `sections`, with each paragraph that is only a web address or only a document link
+    /// shown as a `.linkCard` when `linkCards` allows it, decided as the live editor
+    /// decides its cards. Document links resolve against `documentURL` and `libraryURLs`.
+    public func sections(
+        linkCards: MarkdownLinkCardPolicy,
+        linkableDocumentExtensions: Set<String> = ["md", "markdown"],
+        documentURL: URL? = nil,
+        libraryURLs: [URL] = []
+    ) -> [MarkdownDocumentSection] {
+        let artifactParser = MarkdownArtifactParser(linkableDocumentExtensions: linkableDocumentExtensions)
+        func card(for text: String) -> MarkdownArtifactKind? {
+            guard linkCards != .none, !text.contains("\n") else { return nil }
+            let artifacts = artifactParser.artifacts(in: text, noteURL: documentURL, libraryURLs: libraryURLs)
+            guard artifacts.count == 1, let kind = artifacts.first?.kind else { return nil }
+            if case .web = kind, linkCards != .all { return nil }
+            return kind
+        }
+
         var sections: [MarkdownDocumentSection] = []
         var text: [MarkdownBlock] = []
         func flushText() {
@@ -108,6 +166,13 @@ public struct MarkdownDocument: Equatable, Sendable {
             case .image(let source, let alternateText):
                 flushText()
                 sections.append(.image(source: source, alternateText: alternateText))
+            case .paragraph(let paragraph):
+                if let kind = card(for: paragraph.trimmingCharacters(in: .whitespaces)) {
+                    flushText()
+                    sections.append(.linkCard(kind))
+                } else {
+                    text.append(block)
+                }
             default:
                 text.append(block)
             }
@@ -311,25 +376,7 @@ private struct MarkdownDocumentParser {
     }
 
     private func tableContent(_ table: MarkdownTable) -> MarkdownTableContent {
-        func cells(_ row: MarkdownTable.Row) -> [String] {
-            row.cells.map { source.substring(with: $0).replacingOccurrences(of: "\\|", with: "|") }
-        }
-        let headers = cells(table.header)
-        let delimiterCells = source.substring(with: table.delimiterRange)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "|"))
-            .split(separator: "|", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        let alignments = headers.indices.map { index -> MarkdownTableAlignment in
-            guard index < delimiterCells.count else { return .leading }
-            let cell = delimiterCells[index]
-            switch (cell.hasPrefix(":"), cell.hasSuffix(":")) {
-            case (true, true): return .center
-            case (false, true): return .trailing
-            default: return .leading
-            }
-        }
-        return MarkdownTableContent(headers: headers, alignments: alignments, rows: table.rows.map(cells))
+        MarkdownTableContent(table, in: source as String)
     }
 
     private func heading(in line: String) -> MarkdownBlock? {
@@ -367,11 +414,7 @@ private struct MarkdownDocumentParser {
         ))
     }
 
-    /// The editor's nesting rule: any indentation up to four columns is one level deeper.
     private func depth(ofIndentation indentation: String) -> Int {
-        let columns = indentation.reduce(into: 0) { columns, character in
-            columns += character == "\t" ? 4 - (columns % 4) : 1
-        }
-        return columns == 0 ? 0 : (columns + 3) / 4
+        MarkdownVisualSpec.listDepth(ofIndentation: indentation)
     }
 }

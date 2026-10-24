@@ -40,7 +40,7 @@ final class MarkdownListPresentationTests: XCTestCase {
         XCTAssertEqual(Set(items.map(\.listID)).count, 2)
     }
 
-    func testOrderedListLabelsAlternateByDepthAndContinueAlphabetically() {
+    func testOrderedListLabelsCycleNumbersLettersAndNumeralsByDepth() {
         let text = """
         1. Parent
             1. First child
@@ -52,7 +52,7 @@ final class MarkdownListPresentationTests: XCTestCase {
 
         let items = MarkdownOrderedListItem.items(in: text)
 
-        XCTAssertEqual(items.map(\.displayLabel), ["1.", "a.", "b.", "1.", "a.", "b."])
+        XCTAssertEqual(items.map(\.displayLabel), ["1.", "a.", "b.", "i.", "1.", "2."])
     }
 
     @MainActor
@@ -74,7 +74,7 @@ final class MarkdownListPresentationTests: XCTestCase {
 
         XCTAssertEqual(
             textView.renderedOrderedLists.map(\.label),
-            ["1.", "a.", "1.", "a.", "2."]
+            ["1.", "a.", "i.", "1.", "2."]
         )
         let childNumberRange = try XCTUnwrap(
             MarkdownOrderedListItem.items(in: text).dropFirst().first?.numberRange

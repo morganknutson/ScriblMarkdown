@@ -281,29 +281,19 @@ final class MarkdownEditorBehaviorTests: XCTestCase {
     }
 
     @MainActor
-    func testStyledEditorRendersDashListMarkerAsBulletGlyph() throws {
-        var text = "- Item"
-        let coordinator = MarkdownEditorController(
-            presentation: .styled,
-            titlePolicy: .note,
-            onTextChange: { text = $0 }
-        )
-        let textView = NSTextView()
+    func testStyledEditorDrawsBulletsByDepthOverHiddenMarkers() throws {
+        let text = "- One\n    * Two\n        + Three\n            - Four\n- [ ] Task"
+        let coordinator = MarkdownEditorController(presentation: .styled)
+        let textView = MarkdownEditorTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         textView.string = text
-        let layoutManager = try XCTUnwrap(textView.layoutManager)
-        layoutManager.delegate = coordinator
+        textView.layoutManager?.delegate = coordinator
 
         coordinator.applyPresentation(to: textView)
-        layoutManager.ensureGlyphs(forCharacterRange: NSRange(location: 0, length: 1))
 
-        let glyphIndex = layoutManager.glyphIndexForCharacter(at: 0)
-        let renderedGlyph = layoutManager.glyph(at: glyphIndex)
-        let markerFont = try XCTUnwrap(
-            textView.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
-        )
-
-        XCTAssertEqual(renderedGlyph, markerFont.glyph(withName: "bullet"))
-        XCTAssertEqual(textView.string, "- Item")
+        XCTAssertEqual(textView.renderedBullets.map(\.symbol), ["\u{2022}", "\u{25E6}", "\u{25AA}", "\u{25AA}"])
+        let marker = try XCTUnwrap(textView.renderedBullets.first?.markerLocation)
+        XCTAssertEqual(textView.textStorage?.attribute(.foregroundColor, at: marker, effectiveRange: nil) as? NSColor, .clear)
+        XCTAssertEqual(textView.string, text)
     }
 
     @MainActor

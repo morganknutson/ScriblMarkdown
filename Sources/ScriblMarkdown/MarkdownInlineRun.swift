@@ -10,17 +10,25 @@ public struct MarkdownInlineRun: Equatable, Sendable {
     public let link: String?
     /// Set for a footnote reference, whose text is the footnote's number.
     public let footnoteOrdinal: Int?
+    /// `<kbd>` text, shown as a keycap.
+    public let isKeycap: Bool
+    /// Inline `$math$`, whose text is already its display form.
+    public let isMath: Bool
 
     public init(
         text: String,
         styles: Set<MarkdownInlineSpan.Style> = [],
         link: String? = nil,
-        footnoteOrdinal: Int? = nil
+        footnoteOrdinal: Int? = nil,
+        isKeycap: Bool = false,
+        isMath: Bool = false
     ) {
         self.text = text
         self.styles = styles
         self.link = link
         self.footnoteOrdinal = footnoteOrdinal
+        self.isKeycap = isKeycap
+        self.isMath = isMath
     }
 }
 
@@ -29,6 +37,10 @@ public struct MarkdownInlineRun: Equatable, Sendable {
 public enum MarkdownInlineParser {
     private static let footnoteReferencePattern = try! NSRegularExpression(pattern: #"\[\^([^\]\s]+)\]"#)
     private static let inlineImagePattern = try! NSRegularExpression(pattern: #"!\[([^\]\n]*)\]\(([^)\n]+)\)"#)
+    private static let keycapPattern = try! NSRegularExpression(pattern: #"<kbd>([^\r\n]*?)</kbd>"#, options: .caseInsensitive)
+    private static let inlineMathPattern = try! NSRegularExpression(pattern: #"(?<!\$)\$([^$\r\n]+)\$(?!\$)"#)
+    /// An HTML tag: a name, then attributes or the end. `<https://…>` autolinks don't match.
+    private static let htmlTagPattern = try! NSRegularExpression(pattern: #"</?[A-Za-z][A-Za-z0-9-]*(?:[ \t/][^>\r\n]*)?>"#)
 
     /// `footnoteOrdinals` numbers `[^label]` references; unknown labels stay literal.
     public static func runs(in text: String, footnoteOrdinals: [String: Int] = [:]) -> [MarkdownInlineRun] {
@@ -44,6 +56,8 @@ public enum MarkdownInlineParser {
         var styles = [Set<MarkdownInlineSpan.Style>](repeating: [], count: length)
         var links = [String?](repeating: nil, count: length)
         var footnotes = [Int?](repeating: nil, count: length)
+        var keycaps = [Bool](repeating: false, count: length)
+        var math = [Bool](repeating: false, count: length)
 
         func hide(_ range: NSRange) {
             for index in range.location..<NSMaxRange(range) { hidden[index] = true }
@@ -58,6 +72,26 @@ public enum MarkdownInlineParser {
             }
         }
         var literalRanges = codeSpans.map(\.range)
+
+        // Keycaps and inline math display as the live editor draws them; their content is
+        // literal. Other inline HTML tags are hidden, as the editor hides them.
+        for match in keycapPattern.matches(in: text, range: fullRange) where !intersects(match.range, literalRanges) {
+            let content = match.range(at: 1)
+            hide(NSRange(location: match.range.location, length: content.location - match.range.location))
+            hide(NSRange(location: NSMaxRange(content), length: NSMaxRange(match.range) - NSMaxRange(content)))
+            for index in content.location..<NSMaxRange(content) { keycaps[index] = true }
+            literalRanges.append(match.range)
+        }
+        for match in inlineMathPattern.matches(in: text, range: fullRange) where !intersects(match.range, literalRanges) {
+            hide(match.range)
+            replacement[match.range.location] = MarkdownMathDisplay.text(for: source.substring(with: match.range(at: 1)))
+            math[match.range.location] = true
+            literalRanges.append(match.range)
+        }
+        for match in htmlTagPattern.matches(in: text, range: fullRange) where !intersects(match.range, literalRanges) {
+            hide(match.range)
+            literalRanges.append(match.range)
+        }
 
         // Inline images have no text to show inline; their alternate text stands in.
         for match in inlineImagePattern.matches(in: text, range: fullRange)
@@ -108,9 +142,18 @@ public enum MarkdownInlineParser {
         var currentStyles: Set<MarkdownInlineSpan.Style> = []
         var currentLink: String?
         var currentFootnote: Int?
+        var currentKeycap = false
+        var currentMath = false
         func flush() {
             guard !buffer.isEmpty else { return }
-            runs.append(MarkdownInlineRun(text: buffer, styles: currentStyles, link: currentLink, footnoteOrdinal: currentFootnote))
+            runs.append(MarkdownInlineRun(
+                text: buffer,
+                styles: currentStyles,
+                link: currentLink,
+                footnoteOrdinal: currentFootnote,
+                isKeycap: currentKeycap,
+                isMath: currentMath
+            ))
             buffer = ""
         }
 
@@ -129,11 +172,14 @@ public enum MarkdownInlineParser {
                 visibleText = source.substring(with: composed)
             }
             if let visibleText {
-                if styles[index] != currentStyles || links[index] != currentLink || footnotes[index] != currentFootnote {
+                if styles[index] != currentStyles || links[index] != currentLink || footnotes[index] != currentFootnote
+                    || keycaps[index] != currentKeycap || math[index] != currentMath || math[index] {
                     flush()
                     currentStyles = styles[index]
                     currentLink = links[index]
                     currentFootnote = footnotes[index]
+                    currentKeycap = keycaps[index]
+                    currentMath = math[index]
                 }
                 buffer += visibleText
             }

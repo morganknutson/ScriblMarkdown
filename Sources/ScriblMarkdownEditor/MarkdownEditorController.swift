@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import ScriblMarkdown
+import ScriblMarkdownRenderer
 
 /// Drives a `MarkdownEditorTextView`: restyles the Markdown source after every edit,
 /// lays out rendered objects (images, cards, checklists, tables, math), and implements
@@ -25,7 +26,10 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
     var lastFocusRequestID: UUID?
     public var onFocusRequestHandled: ((UUID) -> Void)?
     private var isStyling = false
-    private var bulletCharacterIndexes: Set<Int> = []
+    /// Set while a shared editing rule's edit is applied, so the edit itself doesn't
+    /// trigger typing shortcuts or renumbering.
+    private var isApplyingRuleEdit = false
+    private var linkPopover: MarkdownLinkPopover?
     private var softBreakCharacterIndexes: Set<Int> = []
     private struct RenderedObjectGlyphLayout {
         let range: NSRange
@@ -134,6 +138,10 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         textView.recordEditorEvent = { [weak self] message, metadata in
             self?.host?.recordEditorEvent(message, metadata: metadata)
         }
+        textView.performCommand = { [weak self, weak textView] action in
+            guard let self, let textView else { return }
+            self.apply(action, to: textView)
+        }
     }
 
     func handleFocusRequest(_ requestID: UUID?, in textView: NSTextView) {
@@ -149,7 +157,13 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
     }
 
     public func textDidChange(_ notification: Notification) {
-        guard !isStyling, let textView = notification.object as? NSTextView else { return }
+        guard !isStyling, !isApplyingRuleEdit, let textView = notification.object as? NSTextView else { return }
+        if !textView.hasMarkedText(),
+           let renumber = MarkdownEditingRules.renumberOrderedLists(in: textView.string, selection: textView.selectedRange()) {
+            // Applying it finishes this change too.
+            apply(renumber, to: textView)
+            return
+        }
         let bulletRanges = MarkdownListNormalizer.literalBulletMarkerRanges(in: textView.string)
         if let storage = textView.textStorage, !bulletRanges.isEmpty {
             isStyling = true
@@ -264,6 +278,18 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             )
             return false
         }
+        if !isApplyingRuleEdit,
+           textView.undoManager?.isUndoing != true,
+           textView.undoManager?.isRedoing != true,
+           !textView.hasMarkedText(),
+           let shortcut = MarkdownEditingRules.typingShortcut(
+               in: textView.string,
+               selection: affectedCharRange,
+               replacement: replacement
+           ) {
+            apply(shortcut, to: textView)
+            return false
+        }
         if presentation == .styled {
             (textView as? MarkdownEditorTextView)?.prepareForTextChange(
                 in: affectedCharRange,
@@ -280,7 +306,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 return true
             }
             if presentation == .styled,
-               handleListMarkerDeletion(in: textView, forward: false) {
+               applyRule(MarkdownEditingRules.deleteAtListMarker(in: textView.string, selection: textView.selectedRange(), forward: false), to: textView) {
                 return true
             }
             return preserveTitlePrefixDuringDeletion(in: textView, forward: false)
@@ -291,7 +317,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 return true
             }
             if presentation == .styled,
-               handleListMarkerDeletion(in: textView, forward: true) {
+               applyRule(MarkdownEditingRules.deleteAtListMarker(in: textView.string, selection: textView.selectedRange(), forward: true), to: textView) {
                 return true
             }
             return preserveTitlePrefixDuringDeletion(in: textView, forward: true)
@@ -313,16 +339,39 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             return true
         }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            return continueListAfterNewline(in: textView)
+            return applyRule(MarkdownEditingRules.newline(in: textView.string, selection: textView.selectedRange()), to: textView)
         }
         if commandSelector == #selector(NSResponder.insertTab(_:))
             || commandSelector == NSSelectorFromString("insertTabIgnoringFieldEditor:") {
-            return adjustListIndent(in: textView, outdent: false)
+            return handleTab(in: textView, backward: false)
         }
         if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
-            return adjustListIndent(in: textView, outdent: true)
+            return handleTab(in: textView, backward: true)
         }
         return false
+    }
+
+    /// Tab moves between table cells, types a tab in code, and indents list items;
+    /// Shift-Tab does the reverse. Elsewhere Tab types a tab.
+    private func handleTab(in textView: NSTextView, backward: Bool) -> Bool {
+        let source = textView.string
+        let selection = textView.selectedRange()
+        if let cell = MarkdownEditingRules.tableCellSelection(in: source, selection: selection, forward: !backward) {
+            textView.setSelectedRange(cell)
+            textView.scrollRangeToVisible(cell)
+            return true
+        }
+        if MarkdownEditingRules.isInsideCodeBlock(selection.location, in: source) {
+            return backward
+        }
+        return applyRule(MarkdownEditingRules.indent(in: source, selection: selection, outdent: backward), to: textView)
+    }
+
+    /// Applies a shared editing rule's result. Returns whether the rule handled the key.
+    private func applyRule(_ edit: MarkdownEdit?, to textView: NSTextView) -> Bool {
+        guard let edit else { return false }
+        apply(edit, to: textView)
+        return true
     }
 
     func apply(_ action: MarkdownEditorCommand.Action, to textView: NSTextView) {
@@ -366,6 +415,8 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 in: textView.string,
                 selection: textView.selectedRange()
             ), to: textView)
+        case .editLink:
+            editLink(in: textView)
         case .horizontalRule:
             apply(MarkdownInsertion.horizontalRule(
                 in: textView.string,
@@ -376,8 +427,58 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
 
     /// Applies a shared source edit through the text view so it is undoable and restyled.
     private func apply(_ edit: MarkdownEdit, to textView: NSTextView) {
-        textView.insertText(edit.replacement, replacementRange: edit.range)
+        if edit.changesText {
+            isApplyingRuleEdit = true
+            textView.insertText(edit.replacement, replacementRange: edit.range)
+            isApplyingRuleEdit = false
+            textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        }
         textView.setSelectedRange(edit.selection)
+    }
+
+    /// Opens the link popover for the link at the caret, or for a new link on the
+    /// selection.
+    private func editLink(in textView: NSTextView) {
+        let source = textView.string
+        let selection = textView.selectedRange()
+        let codeRanges = MarkdownCodeBlock.blocks(in: source).map(\.sourceRange)
+        let existing = MarkdownLinkPresentation.parse(in: source, excluding: codeRanges).links.first {
+            NSLocationInRange(selection.location, $0.sourceRange) || NSMaxRange($0.sourceRange) == selection.location
+                || NSIntersectionRange($0.sourceRange, selection).length > 0
+        }
+        let text = source as NSString
+        let targetRange = existing?.sourceRange ?? selection
+        let title = existing.map { text.substring(with: $0.labelRange) } ?? text.substring(with: selection)
+        let popover = MarkdownLinkPopover(theme: style.theme)
+        linkPopover = popover
+        let anchor = textView.firstRect(forCharacterRange: NSRange(location: targetRange.location, length: max(1, targetRange.length)), actualRange: nil)
+        let windowRect = textView.window?.convertFromScreen(anchor) ?? .zero
+        popover.show(
+            relativeTo: textView.convert(windowRect, from: nil),
+            of: textView,
+            title: title.isEmpty ? nil : title,
+            destination: existing?.destination,
+            onApply: { [weak self, weak textView] title, destination in
+                guard let self, let textView else { return }
+                self.apply(MarkdownInsertion.link(
+                    title: title,
+                    destination: destination,
+                    in: textView.string,
+                    selection: targetRange
+                ), to: textView)
+            },
+            onRemove: existing.map { link in
+                { [weak self, weak textView] in
+                    guard let self, let textView else { return }
+                    let label = (textView.string as NSString).substring(with: link.labelRange)
+                    self.apply(MarkdownEdit(
+                        range: link.sourceRange,
+                        replacement: label,
+                        selection: NSRange(location: link.sourceRange.location + (label as NSString).length, length: 0)
+                    ), to: textView)
+                }
+            }
+        )
     }
 
     func applyPresentation(to textView: NSTextView) {
@@ -385,10 +486,10 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         isStyling = true
         defer { isStyling = false }
 
-        updateBulletCharacterIndexes(in: storage.string)
         if let markdownTextView = textView as? MarkdownEditorTextView {
-            markdownTextView.palette = palette
+            markdownTextView.theme = style.theme
             markdownTextView.linkableDocumentExtensions = artifactParser.linkableDocumentExtensions
+            markdownTextView.tableCellRenderer = MarkdownAttributedRenderer(style: MarkdownRenderStyle(theme: style.theme)).tableCellRenderer
         }
 
         let selectedRange = textView.selectedRange()
@@ -397,8 +498,8 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         paragraph.lineSpacing = presentation == .styled ? 5 : 4
         paragraph.paragraphSpacing = presentation == .styled ? 7 : 0
         let bodyFont = presentation == .styled
-            ? typeface.font(ofSize: scaled(17))
-            : typeface.monospacedFont(ofSize: scaled(15), weight: .regular)
+            ? style.theme.bodyFont
+            : typeface.monospacedFont(ofSize: scaled(MarkdownVisualSpec.referenceCodeSize), weight: .regular)
 
         storage.beginEditing()
         storage.setAttributes([
@@ -422,8 +523,8 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             }
             styleCodeBlocks(visibleCodeBlocks, in: storage, textView: textView)
             let blockExclusions = codeRanges + collapsedDetailsRanges
-            styleTables(in: storage, font: bodyFont, excluding: blockExclusions)
-            styleHorizontalRules(in: storage, font: bodyFont, excluding: blockExclusions, textView: textView)
+            let tables = styleTables(in: storage, font: bodyFont, excluding: blockExclusions)
+            let ruleRanges = styleHorizontalRules(in: storage, font: bodyFont, excluding: blockExclusions, textView: textView)
             styleFootnotes(
                 in: storage,
                 excluding: blockExclusions,
@@ -442,11 +543,14 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 textView: textView
             )
             let protectedRanges = blockExclusions + mathRanges + htmlProtectedRanges
-            style(pattern: #"(?m)^(#{1}[ \t]+)(.*)$"#, in: storage, markerGroup: 1, contentGroup: 2, size: 32, excluding: protectedRanges)
-            style(pattern: #"(?m)^(#{2}[ \t]+)(.+)$"#, in: storage, markerGroup: 1, contentGroup: 2, size: 24, excluding: protectedRanges)
-            style(pattern: #"(?m)^(#{3}[ \t]+)(.+)$"#, in: storage, markerGroup: 1, contentGroup: 2, size: 19, excluding: protectedRanges)
-            style(pattern: #"(?m)^(#{4,6}[ \t]+)(.+)$"#, in: storage, markerGroup: 1, contentGroup: 2, size: 17, excluding: protectedRanges)
+            styleHeadings(in: storage, excluding: protectedRanges)
             styleLists(in: storage, font: bodyFont, excluding: protectedRanges)
+            styleBullets(
+                in: storage,
+                font: bodyFont,
+                textView: textView,
+                excluding: protectedRanges + ruleRanges + tables.map(\.sourceRange)
+            )
             styleOrderedLists(
                 in: storage,
                 font: bodyFont,
@@ -473,7 +577,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 existingMarkerRanges: inlineMarkerRanges,
                 textView: textView
             )
-            layoutTables(in: storage, excluding: blockExclusions)
+            layoutTables(tables, in: storage, textView: textView)
             styleImages(in: storage, textView: textView, excluding: protectedRanges)
             styleArtifacts(in: storage, textView: textView, excluding: protectedRanges)
             updateSoftBreakCharacterIndexes(
@@ -497,6 +601,8 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             (textView as? MarkdownEditorTextView)?.renderedChecklists = []
             (textView as? MarkdownEditorTextView)?.renderedOrderedLists = []
             (textView as? MarkdownEditorTextView)?.renderedCodeBlocks = []
+            (textView as? MarkdownEditorTextView)?.renderedBullets = []
+            (textView as? MarkdownEditorTextView)?.renderedTables = []
             (textView as? MarkdownEditorTextView)?.renderedHorizontalRules = []
             (textView as? MarkdownEditorTextView)?.renderedMath = []
             (textView as? MarkdownEditorTextView)?.renderedBlockQuoteLines = []
@@ -558,7 +664,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         let lineRange = source.lineRange(for: NSRange(location: 0, length: 0))
         guard source.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines) == "#",
               source.length > 2 else { return }
-        let titleFont = typeface.font(ofSize: scaled(32), trait: .boldFontMask)
+        let titleFont = style.theme.headingFont(level: 1)
         let paragraph = (
             storage.attribute(.paragraphStyle, at: 2, effectiveRange: nil) as? NSParagraphStyle
         )?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
@@ -577,7 +683,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         }
         imageTextView.titlePlaceholder = .init(
             text: titlePlaceholder,
-            font: typeface.font(ofSize: scaled(32), trait: .boldFontMask),
+            font: style.theme.headingFont(level: 1),
             color: palette.tertiaryText
         )
     }
@@ -673,26 +779,20 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         ))
     }
 
-    private func style(
-        pattern: String,
-        in storage: NSTextStorage,
-        markerGroup: Int,
-        contentGroup: Int,
-        size: CGFloat,
-        excluding excludedRanges: [NSRange]
-    ) {
-        let regex = try! NSRegularExpression(pattern: pattern)
+    /// ATX headings 1–6 on the shared scale. An empty level-1 heading is the title line.
+    private func styleHeadings(in storage: NSTextStorage, excluding excludedRanges: [NSRange]) {
         let range = NSRange(location: 0, length: storage.length)
-        regex.enumerateMatches(in: storage.string, range: range) { match, _, _ in
+        Self.headingExpression.enumerateMatches(in: storage.string, range: range) { match, _, _ in
             guard let match, !intersects(match.range, excludedRanges) else { return }
-            hideMarker(in: storage, range: match.range(at: markerGroup))
-            storage.addAttribute(
-                .font,
-                value: typeface.font(ofSize: scaled(size), trait: .boldFontMask),
-                range: match.range(at: contentGroup)
-            )
+            let level = match.range(at: 1).length
+            let content = match.range(at: 3)
+            guard level == 1 || content.length > 0 else { return }
+            hideMarker(in: storage, range: NSRange(location: match.range.location, length: content.location - match.range.location))
+            storage.addAttribute(.font, value: style.theme.headingFont(level: level), range: content)
         }
     }
+
+    private static let headingExpression = try! NSRegularExpression(pattern: #"(?m)^(#{1,6})([ \t]+)(.*)$"#)
 
     @discardableResult
     private func styleInlineMarkdown(
@@ -712,7 +812,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             case .strikethrough:
                 storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: span.contentRange)
             case .highlight:
-                storage.addAttribute(.backgroundColor, value: palette.highlight.withAlphaComponent(0.24), range: span.contentRange)
+                storage.addAttribute(.backgroundColor, value: palette.highlightBackground, range: span.contentRange)
             case .subscript:
                 storage.addAttribute(.baselineOffset, value: scaled(-3), range: span.contentRange)
             case .superscript:
@@ -771,8 +871,9 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         let spans = MarkdownInlineSyntax.codeSpans(in: storage.string, excluding: excludedRanges)
         for span in spans {
             storage.addAttributes([
-                .font: typeface.monospacedFont(ofSize: scaled(15), weight: .regular),
-                .backgroundColor: palette.quaternaryText.withAlphaComponent(0.35)
+                .font: style.theme.inlineCodeFont,
+                .foregroundColor: palette.inlineCodeText,
+                .backgroundColor: palette.inlineCodeBackground
             ], range: span.contentRange)
             span.markerRanges.forEach { hideMarker(in: storage, range: $0) }
         }
@@ -903,12 +1004,6 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 size: NSSize(width: quoteIndent, height: font.pointSize)
             ))
 
-            if line.contentRange.length > 0 {
-                storage.addAttributes([
-                    .font: typeface.font(ofSize: scaled(17), trait: .italicFontMask),
-                    .foregroundColor: palette.secondaryText
-                ], range: line.contentRange)
-            }
 
             let paragraph = (
                 storage.attribute(
@@ -925,7 +1020,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 let markerText: String
                 switch listMarker {
                 case .unordered:
-                    markerText = "• "
+                    markerText = "- "
                 case .ordered(let range):
                     markerText = source.substring(with: range)
                 }
@@ -995,6 +1090,41 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             paragraph.lineSpacing = 2
             storage.addAttribute(.paragraphStyle, value: paragraph, range: paragraphRange)
         }
+    }
+
+    private static let bulletExpressions = [
+        try! NSRegularExpression(pattern: #"(?m)^([ \t]*)([-*+])(?=[ \t]+)"#),
+        try! NSRegularExpression(pattern: #"(?m)^[ \t]*(?:>[ \t]*)+()([-*+])(?=[ \t]+)"#)
+    ]
+
+    /// Bullet markers keep their place in the text but are drawn as the depth's symbol
+    /// (• ◦ ▪), so `-`, `*` and `+` all read as bullets. Checklist markers draw boxes instead.
+    private func styleBullets(
+        in storage: NSTextStorage,
+        font: NSFont,
+        textView: NSTextView,
+        excluding excludedRanges: [NSRange]
+    ) {
+        guard let markdownTextView = textView as? MarkdownEditorTextView else { return }
+        let source = storage.string as NSString
+        let checklistMarkers = Set(MarkdownChecklistItem.items(in: storage.string).map {
+            NSMaxRange($0.indentationRange)
+        })
+        var rendered: [MarkdownEditorTextView.RenderedBullet] = []
+        for expression in Self.bulletExpressions {
+            for match in expression.matches(in: storage.string, range: NSRange(location: 0, length: source.length)) {
+                let marker = match.range(at: 2)
+                guard !intersects(marker, excludedRanges), !checklistMarkers.contains(marker.location) else { continue }
+                let depth = MarkdownVisualSpec.listDepth(ofIndentation: source.substring(with: match.range(at: 1)))
+                storage.addAttribute(.foregroundColor, value: NSColor.clear, range: marker)
+                rendered.append(.init(
+                    markerLocation: marker.location,
+                    symbol: MarkdownVisualSpec.bulletSymbol(depth: depth),
+                    font: storage.attribute(.font, at: marker.location, effectiveRange: nil) as? NSFont ?? font
+                ))
+            }
+        }
+        markdownTextView.renderedBullets = rendered.sorted { $0.markerLocation < $1.markerLocation }
     }
 
     private func styleOrderedLists(
@@ -1093,8 +1223,8 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         }
         let source = storage.string as NSString
         let items = MarkdownChecklistItem.items(in: storage.string)
-        let controlSize = max(14, min(17, ceil(font.pointSize * 0.88)))
-        let controlSlotWidth = controlSize + 9
+        let controlSize = MarkdownDrawnMarkers.checklistBoxSize(for: font)
+        let controlSlotWidth = MarkdownDrawnMarkers.checklistSlotWidth(for: font)
         var rendered: [MarkdownEditorTextView.RenderedChecklist] = []
         var glyphLayouts: [RenderedObjectGlyphLayout] = []
 
@@ -1142,7 +1272,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             )
             if item.isChecked, item.contentRange.length > 0 {
                 storage.addAttributes([
-                    .foregroundColor: palette.secondaryText,
+                    .foregroundColor: palette.completedText,
                     .strikethroughStyle: NSUnderlineStyle.single.rawValue
                 ], range: item.contentRange)
             }
@@ -1181,6 +1311,12 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             + paragraph.paragraphSpacing
     }
 
+    private static let fenceExpression = try! NSRegularExpression(pattern: #"^([ \t]*(?:`{3,}|~{3,})[ \t]*)(.*)$"#)
+
+    /// Fenced code on the shared code block surface: the opening fence becomes the header
+    /// (its language stays editable text, set in the header style, with copy and pop-out
+    /// buttons drawn over it), the code is syntax-colored beside a line-number gutter, and
+    /// the closing fence collapses. An empty block keeps its fences visible as source.
     private func styleCodeBlocks(
         _ blocks: [MarkdownCodeBlock],
         in storage: NSTextStorage,
@@ -1188,10 +1324,20 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
     ) {
         guard let markdownTextView = textView as? MarkdownEditorTextView else { return }
         let source = storage.string as NSString
-        let font = typeface.monospacedFont(ofSize: scaled(15), weight: .regular)
+        let surface = style.theme.surface
+        let font = surface.codeFont
+        let padding = MarkdownCodeBlockLayout.gutterPadding
+        var rendered: [MarkdownEditorTextView.RenderedCodeBlock] = []
         for block in blocks {
+            guard block.contentRange.length > 0 else {
+                storage.addAttribute(.font, value: font, range: block.sourceRange)
+                continue
+            }
+            let language = codeLanguage(of: block, in: source)
+            var headerLineRange: NSRange?
             if let openingRange = block.openingRange {
-                collapseLine(in: storage, range: openingRange)
+                styleCodeBlockHeader(openingRange, in: storage)
+                headerLineRange = openingRange
             }
             if let closingRange = block.closingRange {
                 collapseLine(in: storage, range: closingRange)
@@ -1199,43 +1345,101 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             for indentationRange in block.indentationRanges {
                 hideMarker(in: storage, range: indentationRange)
             }
-            guard block.contentRange.length > 0 else { continue }
             storage.addAttribute(.font, value: font, range: block.contentRange)
-            highlightCode(in: block, storage: storage)
-            var location = block.contentRange.location
-            while location < NSMaxRange(block.contentRange), location < source.length {
-                let lineRange = NSIntersectionRange(
-                    source.lineRange(for: NSRange(location: location, length: 0)),
-                    block.contentRange
-                )
-                guard lineRange.length > 0 else { break }
-                let paragraph = (
-                    storage.attribute(.paragraphStyle, at: location, effectiveRange: nil)
-                        as? NSParagraphStyle
-                )?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
-                paragraph.firstLineHeadIndent = 12
-                paragraph.headIndent = 12
-                paragraph.tailIndent = -12
+            highlightCode(in: block, language: language, storage: storage)
+
+            let lines = codeLineRanges(in: block.contentRange, source: source)
+            let gutterWidth = MarkdownCodeBlockLayout.gutterWidth(lineCount: lines.count, font: font)
+            for (index, lineRange) in lines.enumerated() {
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.firstLineHeadIndent = gutterWidth
+                paragraph.headIndent = gutterWidth
+                paragraph.tailIndent = -padding
                 paragraph.lineSpacing = 2
-                paragraph.paragraphSpacing = 0
+                paragraph.paragraphSpacingBefore = index == 0 ? padding : 0
+                paragraph.paragraphSpacing = index == lines.count - 1 ? padding : 0
                 storage.addAttribute(.paragraphStyle, value: paragraph, range: lineRange)
-                location = NSMaxRange(lineRange)
             }
+            let code = NSMutableString(string: source.substring(with: block.contentRange))
+            for indentationRange in block.indentationRanges.reversed() {
+                code.deleteCharacters(in: NSRange(location: indentationRange.location - block.contentRange.location, length: indentationRange.length))
+            }
+            if code.hasSuffix("\n") { code.deleteCharacters(in: NSRange(location: code.length - 1, length: 1)) }
+            rendered.append(.init(
+                sourceRange: block.sourceRange,
+                contentRange: block.contentRange,
+                headerLineRange: headerLineRange,
+                language: language,
+                code: code as String,
+                lineNumberFont: font,
+                gutterWidth: gutterWidth
+            ))
         }
-        markdownTextView.renderedCodeBlocks = blocks.compactMap { block in
-            guard block.contentRange.length > 0 else { return nil }
-            return .init(sourceRange: block.sourceRange, contentRange: block.contentRange)
-        }
+        markdownTextView.renderedCodeBlocks = rendered
     }
 
-    private func highlightCode(in block: MarkdownCodeBlock, storage: NSTextStorage) {
-        guard let highlighter = host?.codeHighlighter else { return }
+    /// The opening fence as the header line: the fence characters hidden, the language set
+    /// in the header font (small caps, like the display header's capitals) and centered in
+    /// a header-height line.
+    private func styleCodeBlockHeader(_ lineRange: NSRange, in storage: NSTextStorage) {
         let source = storage.string as NSString
-        let language = block.openingRange.flatMap { range -> String? in
+        let line = source.substring(with: lineRange).trimmingCharacters(in: .newlines)
+        guard let match = Self.fenceExpression.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) else { return }
+        let surface = style.theme.surface
+        let height = MarkdownCodeBlockHeaderView.height
+        let fenceRange = NSRange(location: lineRange.location + match.range(at: 1).location, length: match.range(at: 1).length)
+        let infoRange = NSRange(location: lineRange.location + match.range(at: 2).location, length: match.range(at: 2).length)
+        hideMarker(in: storage, range: fenceRange)
+
+        let font = NSFont(
+            descriptor: surface.headerFont.fontDescriptor.addingAttributes([
+                .featureSettings: [[
+                    NSFontDescriptor.FeatureKey.typeIdentifier: kLowerCaseType,
+                    NSFontDescriptor.FeatureKey.selectorIdentifier: kLowerCaseSmallCapsSelector
+                ]]
+            ]),
+            size: surface.headerFont.pointSize
+        ) ?? surface.headerFont
+        let lineHeight = font.ascender - font.descender + font.leading
+        storage.addAttributes([
+            .font: font,
+            .foregroundColor: surface.headerText,
+            .baselineOffset: max(0, (height - lineHeight) / 2)
+        ], range: infoRange)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = height
+        paragraph.maximumLineHeight = height
+        paragraph.firstLineHeadIndent = 10
+        paragraph.headIndent = 10
+        paragraph.tailIndent = -60
+        paragraph.lineBreakMode = .byTruncatingTail
+        storage.addAttribute(.paragraphStyle, value: paragraph, range: lineRange)
+    }
+
+    private func codeLanguage(of block: MarkdownCodeBlock, in source: NSString) -> String? {
+        block.openingRange.flatMap { range -> String? in
             let info = source.substring(with: range)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "`~").union(.whitespacesAndNewlines))
             return info.split(whereSeparator: \.isWhitespace).first.map(String.init)
         }
+    }
+
+    private func codeLineRanges(in contentRange: NSRange, source: NSString) -> [NSRange] {
+        var lines: [NSRange] = []
+        var location = contentRange.location
+        while location < NSMaxRange(contentRange), location < source.length {
+            let lineRange = NSIntersectionRange(source.lineRange(for: NSRange(location: location, length: 0)), contentRange)
+            guard lineRange.length > 0 else { break }
+            lines.append(lineRange)
+            location = NSMaxRange(lineRange)
+        }
+        return lines
+    }
+
+    /// The host's highlighter, else the shared one in the theme's syntax colors.
+    private func highlightCode(in block: MarkdownCodeBlock, language: String?, storage: NSTextStorage) {
+        let highlighter = host?.codeHighlighter ?? MarkdownSyntaxHighlighter(colors: style.theme.syntax)
+        let source = storage.string as NSString
         let code = source.substring(with: block.contentRange)
         for run in highlighter.colorRuns(forCode: code, language: language) {
             let range = NSRange(location: block.contentRange.location + run.range.location, length: run.range.length)
@@ -1245,94 +1449,105 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         }
     }
 
+    private static let escapedPipeExpression = try! NSRegularExpression(pattern: #"\\(?=\|)"#)
+
+    /// Tables stay editable source under a drawn grid: pipes hide, the delimiter row
+    /// collapses, the header is bold and every row gets the cell padding. Column alignment
+    /// happens in `layoutTables` once cell fonts are final.
+    @discardableResult
     private func styleTables(
         in storage: NSTextStorage,
         font: NSFont,
         excluding excludedRanges: [NSRange]
-    ) {
+    ) -> [MarkdownTable] {
         let tables = MarkdownTable.tables(in: storage.string, excluding: excludedRanges)
+        let padding = MarkdownTableView.verticalCellPadding
         tableGlyphLayouts = []
         for table in tables {
-            let allRows = [table.header] + table.rows
             storage.addAttribute(
                 .font,
-                value: typeface.font(ofSize: scaled(17), trait: .boldFontMask),
+                value: NSFontManager.shared.convert(style.theme.bodyFont, toHaveTrait: .boldFontMask),
                 range: table.header.lineRange
             )
-            for row in allRows {
+            storage.addAttribute(.foregroundColor, value: style.theme.surface.tableHeaderText, range: table.header.lineRange)
+            for row in [table.header] + table.rows {
                 for separator in row.separators where separator.length > 0 {
                     hideMarker(in: storage, range: separator)
-                    storage.addAttribute(
-                        .font,
-                        value: font,
-                        range: NSRange(location: separator.location, length: 1)
-                    )
+                    storage.addAttribute(.font, value: font, range: NSRange(location: separator.location, length: 1))
                 }
-                let paragraph = (
-                    storage.attribute(.paragraphStyle, at: row.lineRange.location, effectiveRange: nil)
-                        as? NSParagraphStyle
-                )?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
-                paragraph.lineSpacing = 2
-                paragraph.paragraphSpacing = 3
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.lineSpacing = 0
+                paragraph.paragraphSpacingBefore = padding
+                paragraph.paragraphSpacing = padding
+                // Rows without a leading pipe still start one cell padding in.
+                let hasLeadingSeparator = (row.separators.first?.length ?? 0) > 0
+                paragraph.firstLineHeadIndent = hasLeadingSeparator ? 0 : MarkdownTableView.horizontalCellPadding
+                paragraph.headIndent = MarkdownTableView.horizontalCellPadding
                 storage.addAttribute(.paragraphStyle, value: paragraph, range: row.lineRange)
             }
             collapseLine(in: storage, range: table.delimiterRange)
-            let escapedPipe = try! NSRegularExpression(pattern: #"\\(?=\|)"#)
-            for match in escapedPipe.matches(
-                in: storage.string,
-                range: table.sourceRange
-            ) {
+            for match in Self.escapedPipeExpression.matches(in: storage.string, range: table.sourceRange) {
                 hideMarker(in: storage, range: match.range)
             }
         }
+        return tables
     }
 
-    private func layoutTables(
-        in storage: NSTextStorage,
-        excluding excludedRanges: [NSRange]
-    ) {
-        let tables = MarkdownTable.tables(in: storage.string, excluding: excludedRanges)
+    /// Aligns table columns by widening the hidden pipes between cells, and hands the grid
+    /// (row lines, width, cells for pop-out) to the text view to draw.
+    private func layoutTables(_ tables: [MarkdownTable], in storage: NSTextStorage, textView: NSTextView) {
+        let cellPadding = MarkdownTableView.horizontalCellPadding
         var glyphLayouts: [RenderedObjectGlyphLayout] = []
+        var rendered: [MarkdownEditorTextView.RenderedTable] = []
         for table in tables {
-            let allRows = [table.header] + table.rows
-            var columnWidths = Array(repeating: CGFloat(0), count: table.header.cells.count)
-            for row in allRows {
-                for (index, cell) in row.cells.enumerated() {
-                    columnWidths[index] = max(
-                        columnWidths[index],
-                        storage.attributedSubstring(from: cell).size().width
-                    )
+            let rows = [table.header] + table.rows
+            let columnCount = table.header.cells.count
+            var columnWidths = Array(repeating: CGFloat(0), count: columnCount)
+            for row in rows {
+                for (index, cell) in row.cells.enumerated() where index < columnCount {
+                    columnWidths[index] = max(columnWidths[index], storage.attributedSubstring(from: cell).size().width)
                 }
+            }
+            // The header's last cell keeps room for the pop-out button.
+            if columnCount > 0 {
+                columnWidths[columnCount - 1] += MarkdownTableView.popOutButtonSpace
             }
 
-            for row in allRows {
+            for row in rows {
                 for (index, separator) in row.separators.enumerated() where separator.length > 0 {
-                    let spacerWidth: CGFloat
-                    if index == 0 || index > row.cells.count {
-                        spacerWidth = 0
+                    let width: CGFloat
+                    if index == 0 {
+                        width = cellPadding
+                    } else if index - 1 < row.cells.count {
+                        let cellWidth = storage.attributedSubstring(from: row.cells[index - 1]).size().width
+                        let isLast = index - 1 == columnCount - 1
+                        width = columnWidths[index - 1] - cellWidth + (isLast ? cellPadding : cellPadding * 2)
                     } else {
-                        let cellWidth = storage.attributedSubstring(
-                            from: row.cells[index - 1]
-                        ).size().width
-                        spacerWidth = max(14, columnWidths[index - 1] - cellWidth + 22)
+                        width = 0
                     }
-                    glyphLayouts.append(.init(
-                        range: separator,
-                        size: NSSize(width: spacerWidth, height: 0)
-                    ))
+                    glyphLayouts.append(.init(range: separator, size: NSSize(width: max(0, width), height: 0)))
                 }
             }
+            rendered.append(.init(
+                sourceRange: table.sourceRange,
+                headerLineRange: table.header.lineRange,
+                rowLineRanges: table.rows.map(\.lineRange),
+                width: columnWidths.reduce(0, +) + cellPadding * 2 * CGFloat(columnCount),
+                content: MarkdownTableContent(table, in: storage.string)
+            ))
         }
         tableGlyphLayouts = glyphLayouts
+        (textView as? MarkdownEditorTextView)?.renderedTables = rendered
     }
 
+    @discardableResult
     private func styleHorizontalRules(
         in storage: NSTextStorage,
         font: NSFont,
         excluding excludedRanges: [NSRange],
         textView: NSTextView
-    ) {
-        guard let markdownTextView = textView as? MarkdownEditorTextView else { return }
+    ) -> [NSRange] {
+        guard let markdownTextView = textView as? MarkdownEditorTextView else { return [] }
         let ruleRanges = MarkdownInlineSyntax.thematicBreakRanges(in: storage.string, excluding: excludedRanges)
         for range in ruleRanges {
             hideMarker(in: storage, range: range)
@@ -1351,6 +1566,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             storage.addAttribute(.paragraphStyle, value: paragraph, range: range)
         }
         markdownTextView.renderedHorizontalRules = ruleRanges.map { .init(sourceRange: $0) }
+        return ruleRanges
     }
 
     private func styleFootnotes(
@@ -1545,9 +1761,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             let raw = (storage.string as NSString).substring(with: contentRange)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let display = MarkdownMathDisplay.text(for: raw)
-            let font = NSFont(name: "STIX Two Math", size: scaled(isBlock ? 20 : 17))
-                ?? NSFont(name: "Times New Roman", size: scaled(isBlock ? 20 : 17))
-                ?? NSFont.systemFont(ofSize: scaled(isBlock ? 20 : 17))
+            let font = MarkdownDrawnMarkers.mathFont(ofSize: scaled(isBlock ? 20 : 17))
             let size = (display as NSString).size(withAttributes: [.font: font])
             hideMarker(in: storage, range: match.range)
             storage.addAttribute(
@@ -1704,11 +1918,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         where !intersects(match.range, excludedRanges + protectedRanges) {
             let displayText = source.substring(with: match.range(at: 1))
             let font = typeface.monospacedFont(ofSize: scaled(13), weight: .medium)
-            let textSize = (displayText as NSString).size(withAttributes: [.font: font])
-            let size = NSSize(
-                width: ceil(textSize.width + scaled(12)),
-                height: ceil(max(scaled(22), textSize.height + scaled(4)))
-            )
+            let size = MarkdownDrawnMarkers.keycapSize(for: displayText, font: font, scale: scaled(1))
             hideMarker(in: storage, range: match.range)
             storage.addAttribute(
                 .font,
@@ -1834,11 +2044,11 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         )
         for artifact in artifacts {
             hideMarker(in: storage, range: artifact.sourceRange)
-            let content: ArtifactCardContent
+            let content: MarkdownLinkCardContent
             switch artifact.kind {
             case .web(let url):
                 loadMetadataIfNeeded(for: url, textView: artifactTextView)
-                content = webMetadata[url].map(ArtifactCardContent.web) ?? .loading(url: url)
+                content = webMetadata[url].map(MarkdownLinkCardContent.web) ?? .loading(url: url)
             case .note(let reference):
                 content = documentCardContent(for: reference)
             }
@@ -1862,7 +2072,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         artifactTextView.renderedArtifacts = rendered
     }
 
-    private func documentCardContent(for reference: MarkdownNoteReference) -> ArtifactCardContent {
+    private func documentCardContent(for reference: MarkdownNoteReference) -> MarkdownLinkCardContent {
         let resolved: MarkdownLinkedDocument?
         if case .resolved(let url) = reference.state {
             resolved = host?.linkedDocument(at: url)
@@ -2128,24 +2338,6 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         }
     }
 
-    private func updateBulletCharacterIndexes(in string: String) {
-        guard presentation == .styled else {
-            bulletCharacterIndexes = []
-            return
-        }
-
-        let range = NSRange(location: 0, length: (string as NSString).length)
-        let patterns = [
-            #"(?m)^\s*(-)(?=\s+)"#,
-            #"(?m)^[ \t]*(?:>[ \t]*)+[ \t]*(-)(?=[ \t]+)"#
-        ]
-        bulletCharacterIndexes = Set(patterns.flatMap { pattern in
-            let regex = try! NSRegularExpression(pattern: pattern)
-            return regex.matches(in: string, range: range)
-                .map { $0.range(at: 1).location }
-        })
-    }
-
     private func updateSoftBreakCharacterIndexes(
         in string: String,
         excluding excludedRanges: [NSRange]
@@ -2174,7 +2366,7 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             + inlineReplacementGlyphLayouts
             + keycapGlyphLayouts
             + footnoteGlyphLayouts
-        guard !bulletCharacterIndexes.isEmpty || !objectGlyphLayouts.isEmpty else { return 0 }
+        guard !objectGlyphLayouts.isEmpty else { return 0 }
 
         var replacementGlyphs = Array(
             UnsafeBufferPointer(start: glyphs, count: glyphRange.length)
@@ -2182,7 +2374,6 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
         var replacementProperties = Array(
             UnsafeBufferPointer(start: properties, count: glyphRange.length)
         )
-        let bulletGlyph = font.glyph(withName: "bullet")
 
         var replacedGlyph = false
         for index in replacementGlyphs.indices {
@@ -2194,10 +2385,6 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
                 replacementProperties[index] = characterIndex == objectLayout.range.location
                     ? .controlCharacter
                     : .null
-                replacedGlyph = true
-            } else if bulletGlyph != 0,
-                      bulletCharacterIndexes.contains(characterIndex) {
-                replacementGlyphs[index] = CGGlyph(truncatingIfNeeded: bulletGlyph)
                 replacedGlyph = true
             }
         }
@@ -2341,82 +2528,6 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             )
         }
         textView.insertText(replacement, replacementRange: openingTagRange)
-    }
-
-    private func handleListMarkerDeletion(
-        in textView: NSTextView,
-        forward: Bool
-    ) -> Bool {
-        let selection = textView.selectedRange()
-        guard selection.length == 0 else { return false }
-
-        let source = textView.string as NSString
-        let cursorLocation = min(selection.location, source.length)
-        let lineRange = source.lineRange(for: NSRange(location: cursorLocation, length: 0))
-        let line = source.substring(with: lineRange)
-        let expression = try! NSRegularExpression(
-            pattern: #"^([ \t]*)(?:(?:[-*+][ \t]+(?:\[[ xX]\][ \t]+)?)|(?:\d+\.[ \t]+))"#
-        )
-        guard let match = expression.firstMatch(
-            in: line,
-            range: NSRange(location: 0, length: (line as NSString).length)
-        ) else { return false }
-
-        let markerRange = NSRange(
-            location: lineRange.location + match.range.location,
-            length: match.range.length
-        )
-        let isAtMarkerBoundary = forward
-            ? selection.location == markerRange.location
-            : selection.location == NSMaxRange(markerRange)
-        guard isAtMarkerBoundary else { return false }
-
-        if !forward, match.range(at: 1).length > 0 {
-            return adjustListIndent(in: textView, outdent: true)
-        }
-
-        textView.insertText("", replacementRange: markerRange)
-        textView.setSelectedRange(NSRange(location: markerRange.location, length: 0))
-        return true
-    }
-
-    private func normalizeOrderedListNumbers(in textView: NSTextView) {
-        let edits = MarkdownOrderedListItem.items(in: textView.string).compactMap { item in
-            item.rawNumber == item.displayNumber
-                ? nil
-                : (range: item.numberRange, replacement: "\(item.displayNumber)")
-        }
-        guard !edits.isEmpty else { return }
-
-        let selection = textView.selectedRange()
-        for edit in edits.reversed() {
-            textView.insertText(edit.replacement, replacementRange: edit.range)
-        }
-
-        func mappedLocation(_ location: Int, preferReplacementEnd: Bool) -> Int {
-            var delta = 0
-            for edit in edits {
-                let editEnd = NSMaxRange(edit.range)
-                let replacementLength = (edit.replacement as NSString).length
-                if location < edit.range.location { break }
-                if location == edit.range.location {
-                    return edit.range.location + delta
-                        + (preferReplacementEnd ? replacementLength : 0)
-                }
-                if location <= editEnd {
-                    return edit.range.location + delta + replacementLength
-                }
-                delta += replacementLength - edit.range.length
-            }
-            return location + delta
-        }
-
-        let start = mappedLocation(selection.location, preferReplacementEnd: false)
-        let end = mappedLocation(
-            NSMaxRange(selection),
-            preferReplacementEnd: selection.length > 0
-        )
-        textView.setSelectedRange(NSRange(location: start, length: max(0, end - start)))
     }
 
     private func styleSource(in storage: NSTextStorage) {
@@ -2581,149 +2692,6 @@ public final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSLay
             )
             return stripped.isEmpty ? stripped : "- " + stripped
         }
-    }
-
-    private func adjustListIndent(in textView: NSTextView, outdent: Bool) -> Bool {
-        let indentationWidth = 4
-        let string = textView.string as NSString
-        let selection = textView.selectedRange()
-        let selectionStart = min(selection.location, string.length)
-        let selectionEnd = min(NSMaxRange(selection), string.length)
-        let finalSelectedCharacter = selection.length > 0
-            ? max(selectionStart, selectionEnd - 1)
-            : selectionStart
-        let firstLineRange = string.lineRange(for: NSRange(location: selectionStart, length: 0))
-        let lastLineRange = string.lineRange(
-            for: NSRange(location: finalSelectedCharacter, length: 0)
-        )
-        let selectedLinesRange = NSRange(
-            location: firstLineRange.location,
-            length: NSMaxRange(lastLineRange) - firstLineRange.location
-        )
-        let expression = try! NSRegularExpression(
-            pattern: #"^(\s*)(?:[-*+]|\d+\.)\s+(?:\[[ xX]\]\s+)?"#
-        )
-
-        var replacement = ""
-        var edits: [(location: Int, removed: Int, inserted: Int)] = []
-        var containsListItem = false
-        var lineLocation = selectedLinesRange.location
-        while lineLocation < NSMaxRange(selectedLinesRange) {
-            let lineRange = string.lineRange(
-                for: NSRange(location: lineLocation, length: 0)
-            )
-            let line = string.substring(with: lineRange)
-            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                replacement += line
-            } else {
-                guard let match = expression.firstMatch(
-                    in: line,
-                    range: NSRange(location: 0, length: (line as NSString).length)
-                ) else { return false }
-                containsListItem = true
-
-                let leadingWhitespace = match.range(at: 1).length
-                if outdent {
-                    let removedCount = min(indentationWidth, leadingWhitespace)
-                    replacement += (line as NSString).substring(from: removedCount)
-                    if removedCount > 0 {
-                        edits.append((lineRange.location, removedCount, 0))
-                    }
-                } else {
-                    replacement += String(repeating: " ", count: indentationWidth) + line
-                    edits.append((lineRange.location, 0, indentationWidth))
-                }
-            }
-            lineLocation = NSMaxRange(lineRange)
-        }
-
-        guard containsListItem else { return false }
-        guard !edits.isEmpty else { return true }
-        textView.insertText(replacement, replacementRange: selectedLinesRange)
-
-        func mappedLocation(_ originalLocation: Int) -> Int {
-            var accumulatedDelta = 0
-            for edit in edits {
-                guard originalLocation > edit.location else { break }
-                if originalLocation <= edit.location + edit.removed {
-                    return edit.location + accumulatedDelta + edit.inserted
-                }
-                accumulatedDelta += edit.inserted - edit.removed
-            }
-            return originalLocation + accumulatedDelta
-        }
-
-        let newSelectionStart = mappedLocation(selectionStart)
-        let newSelectionEnd = mappedLocation(selectionEnd)
-        textView.setSelectedRange(NSRange(
-            location: newSelectionStart,
-            length: max(0, newSelectionEnd - newSelectionStart)
-        ))
-        normalizeOrderedListNumbers(in: textView)
-        return true
-    }
-
-    private func continueListAfterNewline(in textView: NSTextView) -> Bool {
-        normalizeOrderedListNumbers(in: textView)
-        let string = textView.string as NSString
-        let selection = textView.selectedRange()
-        guard selection.length == 0 else { return false }
-
-        let cursorLocation = min(selection.location, string.length)
-        let lineRange = string.lineRange(for: NSRange(location: cursorLocation, length: 0))
-        let rawLine = string.substring(with: lineRange) as NSString
-        let newlineLength: Int
-        if rawLine.hasSuffix("\r\n") {
-            newlineLength = 2
-        } else if rawLine.hasSuffix("\n") || rawLine.hasSuffix("\r") {
-            newlineLength = 1
-        } else {
-            newlineLength = 0
-        }
-        let lineLength = rawLine.length - newlineLength
-        let line = rawLine.substring(to: lineLength)
-        let expression = try! NSRegularExpression(
-            pattern: #"^([ \t]*)([-*+]|\d+\.)([ \t]+)(\[[ xX]\][ \t]+)?(.*)$"#
-        )
-        guard let match = expression.firstMatch(
-            in: line,
-            range: NSRange(location: 0, length: (line as NSString).length)
-        ) else { return false }
-
-        let content = (line as NSString).substring(with: match.range(at: 5))
-        if content.trimmingCharacters(in: .whitespaces).isEmpty,
-           cursorLocation >= lineRange.location + lineLength {
-            textView.insertText(
-                "",
-                replacementRange: NSRange(location: lineRange.location, length: lineLength)
-            )
-            textView.setSelectedRange(NSRange(location: lineRange.location, length: 0))
-            return true
-        }
-
-        let indentation = (line as NSString).substring(with: match.range(at: 1))
-        let marker = (line as NSString).substring(with: match.range(at: 2))
-        let checklistRange = match.range(at: 4)
-        let nextMarker: String
-        if checklistRange.location != NSNotFound {
-            nextMarker = "\(marker) [ ] "
-        } else if marker.hasSuffix("."),
-                  let rawNumber = Int(marker.dropLast()) {
-            let number = MarkdownOrderedListItem.items(in: textView.string).first(where: {
-                $0.markerRange.location == lineRange.location
-            })?.displayNumber ?? rawNumber
-            nextMarker = "\(number + 1). "
-        } else {
-            nextMarker = "\(marker) "
-        }
-
-        let insertion = "\n\(indentation)\(nextMarker)"
-        textView.insertText(insertion, replacementRange: selection)
-        textView.setSelectedRange(NSRange(
-            location: cursorLocation + (insertion as NSString).length,
-            length: 0
-        ))
-        return true
     }
 
     private func applyQuoteStyle(to textView: NSTextView) {

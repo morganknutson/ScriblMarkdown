@@ -67,22 +67,9 @@ public struct MarkdownOrderedListItem: Equatable {
     public let indentationLevel: Int
     public let listID: Int
 
+    /// The hierarchy-aware label shown for this item ("1.", "a.", "i.").
     public var displayLabel: String {
-        if indentationLevel.isMultiple(of: 2) {
-            return "\(displayNumber)."
-        }
-        return "\(Self.alphabeticLabel(for: displayNumber))."
-    }
-
-    private static func alphabeticLabel(for number: Int) -> String {
-        var value = max(1, number)
-        var label = ""
-        while value > 0 {
-            value -= 1
-            label.insert(Character(UnicodeScalar(97 + value % 26)!), at: label.startIndex)
-            value /= 26
-        }
-        return label
+        MarkdownVisualSpec.orderedLabel(number: displayNumber, depth: indentationLevel)
     }
 
     public static func items(in source: String) -> [MarkdownOrderedListItem] {
@@ -164,11 +151,7 @@ public struct MarkdownOrderedListItem: Equatable {
                 location: 0,
                 length: markerLocation
             )
-            let indentation = line.substring(with: indentationRange)
-            let indentationColumns = indentation.reduce(into: 0) { columns, character in
-                columns += character == "\t" ? 4 - (columns % 4) : 1
-            }
-            let level = indentationColumns == 0 ? 0 : (indentationColumns + 3) / 4
+            let level = MarkdownVisualSpec.listDepth(ofIndentation: line.substring(with: indentationRange))
 
             guard let orderedMatch else {
                 counters = counters.filter { $0.key < level }
